@@ -1,2 +1,2 @@
-# KIT_Room_Reserve
+# KIT_Room_U KIT_Room_Usage
 九州工業大学の部屋の使用状況を見ることのできるサイトです
