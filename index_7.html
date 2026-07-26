@@ -1,0 +1,1438 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<title>部屋使用状況</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --bg:#F5F7FA;
+    --surface:#FFFFFF;
+    --surface-2:#FAFBFC;
+    --ink:#0F1419;
+    --text:#1E2530;
+    --muted:#6B7684;
+    --line:#E4E9F0;
+    --line-strong:#CED7E3;
+    --accent:#4F46E5;
+    --accent-soft:#EEEEFE;
+    --busy:#D14842;
+    --free:#0B9A6D;
+    --radius:14px;
+    --radius-sm:9px;
+    --shadow:0 1px 2px rgba(16,24,40,.04), 0 4px 16px rgba(16,24,40,.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0D1117;
+      --surface:#151B23;
+      --surface-2:#1A212B;
+      --ink:#F2F5F9;
+      --text:#E1E7EF;
+      --muted:#8B96A7;
+      --line:#242C38;
+      --line-strong:#36434F;
+      --accent:#8281F7;
+      --accent-soft:#22224A;
+      --busy:#F0776F;
+      --free:#3BC99A;
+      --shadow:0 1px 2px rgba(0,0,0,.32), 0 6px 20px rgba(0,0,0,.26);
+    }
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"Inter","Noto Sans JP",system-ui,sans-serif;
+    font-size:14px;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+    min-height:100vh;
+  }
+  .mono{
+    font-family:"JetBrains Mono",ui-monospace,monospace;
+    font-variant-numeric:tabular-nums;
+  }
+  button{font-family:inherit;}
+
+  /* ---------- 上部バー ---------- */
+  .topbar{
+    position:sticky;
+    top:0;
+    z-index:20;
+    background:var(--bg);
+    border-bottom:1px solid var(--line);
+  }
+  @supports (backdrop-filter: blur(10px)){
+    .topbar{
+      background:color-mix(in srgb, var(--bg) 78%, transparent);
+      backdrop-filter:saturate(170%) blur(12px);
+      -webkit-backdrop-filter:saturate(170%) blur(12px);
+    }
+  }
+  .bar-inner{
+    max-width:1120px;
+    margin:0 auto;
+    padding:14px 20px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+  }
+  .brand{display:flex;align-items:center;gap:10px;min-width:0;}
+  .brand h1{
+    margin:0;
+    font-size:17px;
+    font-weight:700;
+    letter-spacing:-.01em;
+    color:var(--ink);
+    white-space:nowrap;
+  }
+  .pulse{
+    width:8px;height:8px;border-radius:50%;
+    background:var(--free);
+    flex:none;
+    animation:pulse 2.4s infinite;
+  }
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(11,154,109,.45);}
+    70%{box-shadow:0 0 0 7px rgba(11,154,109,0);}
+    100%{box-shadow:0 0 0 0 rgba(11,154,109,0);}
+  }
+  .clock{text-align:right;line-height:1.25;}
+  .clock-time{
+    font-family:"JetBrains Mono",monospace;
+    font-variant-numeric:tabular-nums;
+    font-size:19px;
+    font-weight:500;
+    color:var(--ink);
+    letter-spacing:-.02em;
+  }
+  .clock-date{font-size:11px;color:var(--muted);}
+
+  main{
+    max-width:1120px;
+    margin:0 auto;
+    padding:22px 20px 68px;
+  }
+
+  /* ---------- セグメント型コントロール ---------- */
+  .seg{
+    display:inline-flex;
+    background:var(--surface-2);
+    border:1px solid var(--line);
+    border-radius:11px;
+    padding:3px;
+    gap:2px;
+  }
+  .seg-btn{
+    appearance:none;
+    border:none;
+    background:transparent;
+    color:var(--muted);
+    font-size:13px;
+    font-weight:500;
+    padding:7px 15px;
+    border-radius:8px;
+    cursor:pointer;
+    display:inline-flex;
+    align-items:center;
+    gap:7px;
+    transition:background .15s, color .15s;
+    white-space:nowrap;
+  }
+  .seg-btn:hover{color:var(--text);}
+  .seg-btn.active{
+    background:var(--surface);
+    color:var(--ink);
+    box-shadow:0 1px 2px rgba(16,24,40,.08);
+    font-weight:600;
+  }
+  .seg-btn .n{
+    font-family:"JetBrains Mono",monospace;
+    font-size:10.5px;
+    color:var(--muted);
+    font-weight:400;
+  }
+  .seg-btn.active .n{color:var(--accent);}
+  .seg-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+  .tabs{margin-bottom:18px;}
+
+  /* ---------- 操作パネル ---------- */
+  .card{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:16px 18px;
+  }
+  .controls{margin-bottom:16px;}
+  .ctl-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+  .ctl-row + .ctl-row{
+    margin-top:14px;
+    padding-top:14px;
+    border-top:1px solid var(--line);
+  }
+  .ctl-label{
+    font-size:11px;
+    font-weight:600;
+    letter-spacing:.06em;
+    color:var(--muted);
+  }
+
+  .search-wrap{position:relative;flex:1;min-width:190px;}
+  .search-wrap input{
+    width:100%;
+    font-family:inherit;
+    font-size:14px;
+    padding:10px 13px 10px 36px;
+    border:1px solid var(--line);
+    border-radius:var(--radius-sm);
+    background:var(--surface-2);
+    color:var(--text);
+    transition:border-color .15s, background .15s;
+  }
+  .search-wrap input::placeholder{color:var(--muted);}
+  .search-wrap input:focus{
+    outline:none;
+    border-color:var(--accent);
+    background:var(--surface);
+  }
+  .search-wrap svg{
+    position:absolute;left:12px;top:50%;transform:translateY(-50%);
+    width:15px;height:15px;color:var(--muted);pointer-events:none;
+  }
+  .btn{
+    appearance:none;
+    border:1px solid var(--line);
+    background:var(--surface-2);
+    color:var(--text);
+    font-size:13px;
+    font-weight:500;
+    padding:9px 14px;
+    border-radius:var(--radius-sm);
+    cursor:pointer;
+    transition:background .15s, border-color .15s;
+    white-space:nowrap;
+  }
+  .btn:hover{background:var(--surface);border-color:var(--line-strong);}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+  /* ---------- 時刻の操作行 ---------- */
+  .timebar{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+    margin-bottom:14px;
+  }
+  .mode{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    font-size:12.5px;
+    color:var(--muted);
+  }
+  .mode .dot{width:7px;height:7px;border-radius:50%;background:var(--free);flex:none;}
+  .timebar select, .timebar input[type="time"]{
+    font-family:"JetBrains Mono",monospace;
+    font-size:13px;
+    padding:8px 10px;
+    border:1px solid var(--line);
+    border-radius:var(--radius-sm);
+    background:var(--surface);
+    color:var(--text);
+  }
+  .timebar select:focus, .timebar input[type="time"]:focus{
+    outline:none;border-color:var(--accent);
+  }
+
+  .status-line{
+    font-size:12px;
+    color:var(--muted);
+    margin:0 0 16px;
+  }
+  .status-line.error{color:var(--busy);}
+
+  /* ---------- 表示切り替え行 ---------- */
+  .view-row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+    margin-bottom:4px;
+  }
+
+  /* ---------- 一覧表（部屋 × 時限） ---------- */
+  .matrix-wrap{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    overflow:auto;
+    margin-top:16px;
+  }
+  table.matrix{
+    width:100%;
+    border-collapse:collapse;
+    font-size:12.5px;
+  }
+  table.matrix th, table.matrix td{
+    border-right:1px solid var(--line);
+    border-bottom:1px solid var(--line);
+    padding:0;
+    text-align:center;
+  }
+  table.matrix th:last-child, table.matrix td:last-child{border-right:none;}
+  table.matrix tbody tr:last-child td{border-bottom:none;}
+  table.matrix thead th{
+    background:var(--surface-2);
+    color:var(--muted);
+    font-size:11.5px;
+    font-weight:600;
+    padding:10px 8px;
+    position:sticky;
+    top:0;
+    z-index:1;
+  }
+  table.matrix thead th.now{color:var(--accent);}
+  table.matrix td.mroom{
+    background:var(--surface-2);
+    text-align:left;
+    padding:8px 12px;
+    white-space:nowrap;
+    position:sticky;
+    left:0;
+    z-index:1;
+  }
+  table.matrix td.mroom .n{
+    font-family:"JetBrains Mono",monospace;
+    font-weight:700;
+    color:var(--ink);
+    font-size:13px;
+  }
+  table.matrix td.slot{
+    padding:7px 8px;
+    line-height:1.35;
+  }
+  td.slot.busy{background:rgba(209,72,66,.09);}
+  td.slot.free{background:rgba(11,154,109,.07);}
+  @media (prefers-color-scheme: dark){
+    td.slot.busy{background:rgba(240,119,111,.13);}
+    td.slot.free{background:rgba(59,201,154,.10);}
+  }
+  td.slot .mark{
+    font-size:12px;
+    font-weight:700;
+    display:block;
+  }
+  td.slot.busy .mark{color:var(--busy);}
+  td.slot.free .mark{color:var(--free);}
+  td.slot .sub{
+    font-size:10.5px;
+    color:var(--muted);
+    display:block;
+    max-width:150px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    margin:0 auto;
+  }
+  .legend{
+    display:flex;
+    gap:14px;
+    align-items:center;
+    font-size:11.5px;
+    color:var(--muted);
+    margin-top:10px;
+    flex-wrap:wrap;
+  }
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .legend i{width:10px;height:10px;border-radius:3px;display:inline-block;}
+  .legend .lb{background:rgba(209,72,66,.35);}
+  .legend .lf{background:rgba(11,154,109,.3);}
+
+  /* ---------- 部屋カード ---------- */
+  .sec-head{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin:22px 0 12px;
+  }
+  .sec-head h3{
+    margin:0;
+    font-size:12px;
+    font-weight:700;
+    letter-spacing:.08em;
+  }
+  .sec-head.busy h3{color:var(--busy);}
+  .sec-head.free h3{color:var(--free);}
+  .sec-head .n{
+    font-family:"JetBrains Mono",monospace;
+    font-size:11px;
+    color:var(--muted);
+  }
+  .sec-head::after{content:"";flex:1;height:1px;background:var(--line);}
+
+  .grid-cards{
+    display:grid;
+    grid-template-columns:repeat(auto-fill, minmax(215px, 1fr));
+    gap:11px;
+  }
+  .rcard{
+    position:relative;
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:13px 14px 12px 17px;
+    overflow:hidden;
+    transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  }
+  .rcard::before{
+    content:"";
+    position:absolute;left:0;top:0;bottom:0;width:3px;
+    background:var(--free);
+  }
+  .rcard.busy::before{background:var(--busy);}
+  .rcard:hover{
+    transform:translateY(-1px);
+    box-shadow:var(--shadow);
+    border-color:var(--line-strong);
+  }
+  .rcard-top{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+    margin-bottom:9px;
+  }
+  .rname{
+    font-family:"JetBrains Mono",monospace;
+    font-size:15px;
+    font-weight:700;
+    color:var(--ink);
+    letter-spacing:-.02em;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .bldg{
+    font-size:10px;
+    font-weight:600;
+    padding:2.5px 7px;
+    border-radius:20px;
+    flex:none;
+  }
+  .bldg-lecture{background:var(--accent-soft);color:var(--accent);}
+  .bldg-lab{background:rgba(11,154,109,.12);color:var(--free);}
+  .bldg-other{background:var(--surface-2);color:var(--muted);border:1px solid var(--line);}
+
+  .rstate{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    font-size:11.5px;
+    font-weight:600;
+    margin-bottom:6px;
+  }
+  .rstate .pip{width:6px;height:6px;border-radius:50%;}
+  .rcard.busy .rstate{color:var(--busy);}
+  .rcard.busy .pip{background:var(--busy);}
+  .rcard.free .rstate{color:var(--free);}
+  .rcard.free .pip{background:var(--free);}
+
+  .rtitle{
+    font-size:13px;
+    font-weight:600;
+    color:var(--ink);
+    line-height:1.4;
+    margin-bottom:3px;
+    display:-webkit-box;
+    -webkit-line-clamp:2;
+    -webkit-box-orient:vertical;
+    overflow:hidden;
+  }
+  .rmeta{font-size:11.5px;color:var(--muted);line-height:1.45;}
+  .rmeta .time{font-family:"JetBrains Mono",monospace;}
+  .rnext{font-size:11.5px;color:var(--muted);}
+  .rnext .time{font-family:"JetBrains Mono",monospace;}
+
+  .empty-note{
+    text-align:center;
+    padding:34px 16px;
+    color:var(--muted);
+    font-size:13px;
+    background:var(--surface);
+    border:1px dashed var(--line-strong);
+    border-radius:var(--radius);
+    margin:0;
+  }
+
+  /* ---------- 部屋の選択 ---------- */
+  .room-group + .room-group{margin-top:18px;}
+  .room-group-title{
+    display:flex;
+    align-items:center;
+    gap:9px;
+    font-size:11px;
+    font-weight:700;
+    letter-spacing:.07em;
+    color:var(--muted);
+    margin-bottom:9px;
+  }
+  .room-group-title::after{content:"";flex:1;height:1px;background:var(--line);}
+  .room-chips{display:flex;flex-wrap:wrap;gap:6px;}
+  .room-chip{
+    font-family:"JetBrains Mono",monospace;
+    font-size:12.5px;
+    padding:7px 12px;
+    border-radius:8px;
+    border:1px solid var(--line);
+    background:var(--surface);
+    color:var(--text);
+    cursor:pointer;
+    transition:background .13s, border-color .13s, color .13s;
+  }
+  .room-chip:hover{border-color:var(--accent);color:var(--accent);}
+  .room-chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+  .room-chip.active{
+    background:var(--accent);
+    border-color:var(--accent);
+    color:#fff;
+    font-weight:500;
+  }
+
+  /* ---------- 週間時間割 ---------- */
+  .room-head{
+    display:flex;
+    align-items:center;
+    gap:11px;
+    margin:26px 0 12px;
+    flex-wrap:wrap;
+  }
+  .rh-name{
+    font-family:"JetBrains Mono",monospace;
+    font-size:22px;
+    font-weight:700;
+    color:var(--ink);
+    letter-spacing:-.02em;
+  }
+  .rh-sub{font-size:12px;color:var(--muted);}
+
+  .table-wrap{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    overflow:hidden;
+  }
+  table.grid{
+    width:100%;
+    border-collapse:collapse;
+    font-size:12.5px;
+  }
+  table.grid th, table.grid td{
+    border-right:1px solid var(--line);
+    border-bottom:1px solid var(--line);
+    padding:10px 8px;
+    text-align:center;
+    vertical-align:middle;
+  }
+  table.grid th:last-child, table.grid td:last-child{border-right:none;}
+  table.grid tbody tr:last-child td{border-bottom:none;}
+  table.grid thead th{
+    background:var(--surface-2);
+    color:var(--muted);
+    font-size:11.5px;
+    font-weight:600;
+    letter-spacing:.05em;
+    padding:11px 8px;
+  }
+  table.grid thead th.today{color:var(--accent);}
+  td.timecol{
+    background:var(--surface-2);
+    width:78px;
+    white-space:nowrap;
+  }
+  td.timecol .p{
+    font-size:12px;
+    font-weight:700;
+    color:var(--ink);
+    display:block;
+  }
+  td.timecol .t{
+    font-family:"JetBrains Mono",monospace;
+    font-size:10px;
+    color:var(--muted);
+    display:block;
+    line-height:1.35;
+  }
+  td.filled{background:rgba(79,70,229,.055);}
+  td.filled .cell-title{
+    font-weight:600;
+    font-size:12px;
+    color:var(--ink);
+    line-height:1.35;
+  }
+  td.filled .cell-owner{
+    font-size:10.5px;
+    color:var(--muted);
+    margin-top:2px;
+  }
+  td.empty-cell{color:var(--line-strong);}
+  td.today-col{background:rgba(79,70,229,.03);}
+  td.filled.today-col{background:rgba(79,70,229,.09);}
+
+  footer{
+    max-width:1120px;
+    margin:0 auto;
+    padding:0 20px 32px;
+    font-size:11px;
+    color:var(--muted);
+  }
+
+  @media (max-width:640px){
+    .bar-inner{padding:12px 16px;}
+    main{padding:18px 16px 56px;}
+    footer{padding:0 16px 28px;}
+    .brand h1{font-size:15px;}
+    .clock-time{font-size:16px;}
+    .grid-cards{grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));gap:9px;}
+    .seg{width:100%;}
+    .tabs .seg-btn{flex:1;justify-content:center;}
+    #buildingFilter .seg-btn{flex:1;justify-content:center;padding:7px 8px;}
+    td.timecol{width:54px;}
+    table.grid th, table.grid td{padding:8px 5px;}
+    .rh-name{font-size:19px;}
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    *{animation:none !important;transition:none !important;}
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="bar-inner">
+    <div class="brand">
+      <span class="pulse" aria-hidden="true"></span>
+      <h1>部屋使用状況</h1>
+    </div>
+    <div class="clock">
+      <div class="clock-time" id="clockTime">--:--:--</div>
+      <div class="clock-date" id="clockDate">----.--.--</div>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <div class="seg tabs" id="tabs">
+    <button class="seg-btn active" data-panel="panel-now" type="button">現在の状況</button>
+    <button class="seg-btn" data-panel="panel-room" type="button">部屋ごとの時間割</button>
+  </div>
+
+  <div class="card controls">
+    <div class="ctl-row">
+      <div class="search-wrap">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <circle cx="9" cy="9" r="6"/><path d="M13.5 13.5L17 17" stroke-linecap="round"/>
+        </svg>
+        <input type="text" id="roomSearch" placeholder="部屋名・担当者名で絞り込み（例: 1101、S201、佐藤）">
+      </div>
+      <button class="btn" id="btnClearSearch" type="button">クリア</button>
+    </div>
+    <div class="ctl-row">
+      <span class="ctl-label">建物</span>
+      <div class="seg" id="buildingFilter">
+        <button class="seg-btn active" data-building="all" type="button">すべて<span class="n" id="cnt-all"></span></button>
+        <button class="seg-btn" data-building="lecture" type="button">講義棟<span class="n" id="cnt-lecture"></span></button>
+        <button class="seg-btn" data-building="lab" type="button">研究棟<span class="n" id="cnt-lab"></span></button>
+        <button class="seg-btn" data-building="other" type="button">その他<span class="n" id="cnt-other"></span></button>
+      </div>
+    </div>
+  </div>
+
+  <p class="status-line" id="status-line">データを読み込んでいます…</p>
+
+  <!-- ============ 現在の状況 ============ -->
+  <section class="panel" id="panel-now">
+    <div class="timebar">
+      <span class="mode"><span class="dot" id="liveDot"></span><span id="modeLabel">現在時刻を表示中</span></span>
+      <span style="flex:1"></span>
+      <select id="dayPicker" aria-label="曜日"></select>
+      <input type="time" id="timePicker" aria-label="時刻">
+      <button class="btn" id="btnNow" type="button">現在に戻す</button>
+    </div>
+
+    <div class="ctl-row" style="margin-bottom:14px">
+      <span class="ctl-label">時限</span>
+      <div class="seg" id="periodFilter">
+        <button class="seg-btn active" data-period="now" type="button">現在</button>
+        <button class="seg-btn" data-period="1" type="button">1限</button>
+        <button class="seg-btn" data-period="2" type="button">2限</button>
+        <button class="seg-btn" data-period="3" type="button">3限</button>
+        <button class="seg-btn" data-period="4" type="button">4限</button>
+        <button class="seg-btn" data-period="5" type="button">5限</button>
+      </div>
+    </div>
+
+    <div class="view-row">
+      <div class="seg" id="statusFilter">
+        <button class="seg-btn active" data-status="all" type="button">すべて</button>
+        <button class="seg-btn" data-status="inuse" type="button">使用中</button>
+        <button class="seg-btn" data-status="free" type="button">空室</button>
+      </div>
+      <span style="flex:1"></span>
+      <div class="seg" id="viewMode">
+        <button class="seg-btn active" data-view="cards" type="button">カード</button>
+        <button class="seg-btn" data-view="matrix" type="button">一覧表</button>
+      </div>
+    </div>
+
+    <div id="boardList"></div>
+  </section>
+
+  <!-- ============ 部屋ごとの時間割 ============ -->
+  <section class="panel" id="panel-room" hidden>
+    <div id="roomSelect"></div>
+    <div id="roomTableWrap"></div>
+  </section>
+
+</main>
+
+<footer>データ出典: schedule.xlsx（毎週の定期時間割）</footer>
+
+<script>
+/* =========================================================
+   設定
+========================================================= */
+const EXCEL_FILE = "schedule.xlsx";
+const SHEET_NAME = "時間割";
+const DAYS = ["月","火","水","木","金"]; // この大学は月〜金のみ運用
+const ALL_DAY_NAMES = ["日","月","火","水","木","金","土"];
+
+// この大学の時限
+const PERIODS = [
+  {n:1, start:"08:50", end:"10:20"},
+  {n:2, start:"10:30", end:"12:00"},
+  {n:3, start:"13:00", end:"14:30"},
+  {n:4, start:"14:40", end:"16:10"},
+  {n:5, start:"16:20", end:"17:50"},
+];
+
+let entries = [];
+let rooms = [];
+let selectedRoom = null;
+let searchTerm = "";
+let statusFilter = "all";   // all | inuse | free
+let buildingFilter = "all"; // all | lecture | lab | other
+let periodFilter = "now";   // now | "1"〜"5"
+let viewMode = "cards";     // cards | matrix
+
+/* ---------- 建物の判定 ----------
+   1101 のような数字4桁 → 講義棟
+   S201 のように先頭がアルファベット＋数字 → 研究棟
+   それ以外（端末講義室、MILAiS など） → その他            */
+const BUILDINGS = {lecture:"講義棟", lab:"研究棟", other:"その他"};
+
+function buildingOf(room){
+  if(/^\d{4}$/.test(room)) return "lecture";
+  if(/^[A-Za-z]\d{3}/.test(room)) return "lab";
+  return "other";
+}
+
+/* 講義棟 → 研究棟 → その他 の順、棟の中は番号順 */
+function compareRooms(a, b){
+  const order = {lecture:0, lab:1, other:2};
+  const ba = buildingOf(a), bb = buildingOf(b);
+  if(order[ba] !== order[bb]) return order[ba] - order[bb];
+
+  if(ba === "lecture") return Number(a) - Number(b);
+  if(ba === "lab"){
+    const ma = a.match(/^([A-Za-z])(\d+)/);
+    const mb = b.match(/^([A-Za-z])(\d+)/);
+    const la = ma[1].toUpperCase(), lb = mb[1].toUpperCase();
+    if(la !== lb) return la < lb ? -1 : 1;
+    const na = Number(ma[2]), nb = Number(mb[2]);
+    if(na !== nb) return na - nb;
+  }
+  return a.localeCompare(b, "ja");
+}
+
+function visibleRooms(){
+  let list = rooms;
+  if(buildingFilter !== "all"){
+    list = list.filter(r => buildingOf(r) === buildingFilter);
+  }
+  if(searchTerm){
+    const q = searchTerm.toLowerCase();
+    list = list.filter(r =>
+      r.toLowerCase().includes(q) ||
+      entries.some(e => e.room === r && e.owner.toLowerCase().includes(q))
+    );
+  }
+  return list;
+}
+
+/* 現在時刻表示モード */
+let liveMode = true;
+let viewDayIndex = 0;
+let viewTime = "00:00";
+
+/* =========================================================
+   時刻ユーティリティ
+========================================================= */
+function pad2(n){ return n.toString().padStart(2,"0"); }
+
+function nowHM(){
+  const d = new Date();
+  return pad2(d.getHours())+":"+pad2(d.getMinutes());
+}
+
+function todayDaysIndex(){
+  const jsday = new Date().getDay(); // 0=日,1=月,...6=土
+  const idx = jsday - 1;
+  return (idx >= 0 && idx <= 4) ? idx : -1; // -1 は土日
+}
+
+function toMinutes(hm){
+  const [h,m] = hm.split(":").map(Number);
+  return h*60+m;
+}
+
+function isNowWithin(startHM, endHM, targetHM){
+  const t = toMinutes(targetHM);
+  return t >= toMinutes(startHM) && t < toMinutes(endHM);
+}
+
+/* 判定に使う時刻。時限が選ばれていればその時限の開始時刻を使う */
+function effectiveTime(){
+  if(periodFilter === "now") return viewTime;
+  const p = PERIODS[Number(periodFilter) - 1];
+  return p ? p.start : viewTime;
+}
+
+/* その部屋・曜日・時間帯に入っている授業を返す */
+function classAt(room, day, time){
+  if(!day) return null;
+  return entries.find(e =>
+    e.room === room && e.day === day && isNowWithin(e.start, e.end, time)
+  ) || null;
+}
+
+/* =========================================================
+   Excel読み込み
+========================================================= */
+// 「1限」のような時限表記を実時刻に変換（時限表記でなければnull）
+function resolvePeriodTime(v, endpoint){
+  if(v === "" || v === null || v === undefined) return null;
+  const s = String(v).trim();
+  const m = s.match(/^([1-5])\s*限?$/);
+  if(!m) return null;
+  const p = PERIODS[Number(m[1]) - 1];
+  return p ? p[endpoint] : null;
+}
+
+// 時刻シリアル値もHH:MMに正規化
+function normalizeTime(v){
+  if(v === "" || v === null || v === undefined) return "";
+  if(typeof v === "number"){
+    const totalMinutes = Math.round(v * 24 * 60);
+    const h = Math.floor(totalMinutes/60) % 24;
+    const m = totalMinutes % 60;
+    return pad2(h)+":"+pad2(m);
+  }
+  const s = String(v).trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})/);
+  if(m) return pad2(Number(m[1]))+":"+m[2];
+  return s;
+}
+
+function resolveTimeField(v, endpoint){
+  return resolvePeriodTime(v, endpoint) || normalizeTime(v);
+}
+
+async function loadSchedule(){
+  const statusEl = document.getElementById("status-line");
+  try{
+    const res = await fetch(EXCEL_FILE, {cache:"no-store"});
+    if(!res.ok) throw new Error("ファイルが見つかりません: " + EXCEL_FILE);
+    const buf = await res.arrayBuffer();
+    const wb = XLSX.read(buf, {type:"array"});
+    const sheet = wb.Sheets[SHEET_NAME];
+    if(!sheet) throw new Error(`シート「${SHEET_NAME}」が見つかりません`);
+    const rows = XLSX.utils.sheet_to_json(sheet, {defval:""});
+
+    entries = rows.map(r => {
+      const room = String(r["部屋"] ?? "").trim();
+      const day = String(r["曜日"] ?? "").trim();
+      let start = "", end = "";
+
+      // 新形式: 「時限」列（1〜5）
+      const periodRaw = r["時限"];
+      if(periodRaw !== undefined && periodRaw !== null && String(periodRaw).trim() !== ""){
+        const n = parseInt(String(periodRaw).trim(), 10);
+        const p = PERIODS[n - 1];
+        if(p){ start = p.start; end = p.end; }
+      }
+      // 旧形式: 「開始」「終了」列
+      if(!start || !end){
+        start = resolveTimeField(r["開始"], "start");
+        end = resolveTimeField(r["終了"], "end");
+      }
+
+      return {
+        room, day, start, end,
+        content: String(r["内容"] ?? "").trim(),
+        owner: String(r["担当者"] ?? "").trim(),
+      };
+    }).filter(e => e.room && e.day && e.start && e.end);
+
+    rooms = [...new Set(entries.map(e => e.room))].sort(compareRooms);
+    selectedRoom = rooms[0] || null;
+
+    statusEl.textContent = `${entries.length}件の予定 / ${rooms.length}部屋を読み込みました`;
+    statusEl.classList.remove("error");
+
+    updateBuildingCounts();
+    buildRoomChips();
+    renderRoomTable();
+    renderBoard();
+  }catch(err){
+    statusEl.textContent = "読み込めませんでした: " + err.message + "（schedule.xlsx が index.html と同じ場所にあるか確認してください）";
+    statusEl.classList.add("error");
+    console.error(err);
+  }
+}
+
+/* =========================================================
+   時計・時刻ピッカー
+========================================================= */
+function tickClock(){
+  const d = new Date();
+  document.getElementById("clockTime").textContent =
+    pad2(d.getHours())+":"+pad2(d.getMinutes())+":"+pad2(d.getSeconds());
+  document.getElementById("clockDate").textContent =
+    `${d.getFullYear()}.${pad2(d.getMonth()+1)}.${pad2(d.getDate())} (${ALL_DAY_NAMES[d.getDay()]})`;
+
+  if(liveMode && periodFilter === "now"){
+    viewDayIndex = todayDaysIndex();
+    viewTime = nowHM();
+    renderBoard();
+  }
+}
+
+function syncPickers(){
+  const dayPicker = document.getElementById("dayPicker");
+  dayPicker.value = viewDayIndex >= 0 ? viewDayIndex : 0;
+  document.getElementById("timePicker").value = viewTime;
+}
+
+function setupPickers(){
+  const dayPicker = document.getElementById("dayPicker");
+  DAYS.forEach((d,i)=>{
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = d + "曜日";
+    dayPicker.appendChild(opt);
+  });
+  syncPickers();
+
+  dayPicker.addEventListener("change", ()=>{
+    liveMode = false;
+    viewDayIndex = Number(dayPicker.value);
+    updateModeLabel();
+    renderBoard();
+  });
+  document.getElementById("timePicker").addEventListener("change", (e)=>{
+    liveMode = false;
+    viewTime = e.target.value || "00:00";
+    resetPeriodButtons(); // 時刻を直接指定したら時限の選択は解除する
+    updateModeLabel();
+    renderBoard();
+  });
+  document.getElementById("btnNow").addEventListener("click", ()=>{
+    liveMode = true;
+    viewDayIndex = todayDaysIndex();
+    viewTime = nowHM();
+    resetPeriodButtons();
+    syncPickers();
+    updateModeLabel();
+    renderBoard();
+  });
+}
+
+function updateModeLabel(){
+  const label = document.getElementById("modeLabel");
+  const dot = document.getElementById("liveDot");
+  if(periodFilter !== "now"){
+    const p = PERIODS[Number(periodFilter) - 1];
+    label.textContent = `${DAYS[viewDayIndex]}曜日 ${p.n}限（${p.start}–${p.end}）を表示中`;
+    dot.style.background = "var(--accent)";
+    return;
+  }
+  if(liveMode){
+    label.textContent = viewDayIndex === -1
+      ? "現在時刻を表示中（本日は土日のため授業はありません）"
+      : "現在時刻を表示中";
+    dot.style.background = "var(--free)";
+  }else{
+    label.textContent = `${DAYS[viewDayIndex]}曜日 ${viewTime} を表示中`;
+    dot.style.background = "var(--accent)";
+  }
+}
+
+/* =========================================================
+   現在の状況
+========================================================= */
+function nextClassOf(room, day, time){
+  if(!day) return null;
+  const t = toMinutes(time);
+  const later = entries
+    .filter(e => e.room === room && e.day === day && toMinutes(e.start) > t)
+    .sort((a,b) => toMinutes(a.start) - toMinutes(b.start));
+  return later[0] || null;
+}
+
+function renderBoard(){
+  const list = document.getElementById("boardList");
+  list.innerHTML = "";
+
+  if(rooms.length === 0) return;
+
+  const visible = visibleRooms();
+  if(visible.length === 0){
+    list.innerHTML = `<p class="empty-note">条件に合う部屋が見つかりません。検索語や建物の絞り込みを変えてみてください。</p>`;
+    return;
+  }
+
+  if(viewMode === "matrix"){
+    renderMatrix(list, visible);
+    return;
+  }
+
+  const targetDay = viewDayIndex >= 0 ? DAYS[viewDayIndex] : null;
+  const t = effectiveTime();
+  const inUse = [], free = [];
+  visible.forEach(room => {
+    const match = classAt(room, targetDay, t);
+    (match ? inUse : free).push({room, match});
+  });
+
+  function card(room, match){
+    const el = document.createElement("article");
+    el.className = "rcard " + (match ? "busy" : "free");
+
+    const bld = buildingOf(room);
+    let body;
+    if(match){
+      const left = toMinutes(match.end) - toMinutes(t);
+      body =
+        `<div class="rstate"><span class="pip"></span>使用中</div>` +
+        `<div class="rtitle">${escapeHtml(match.content) || "（内容未設定）"}</div>` +
+        `<div class="rmeta">${match.owner ? escapeHtml(match.owner) + " · " : ""}<span class="time">${match.start}–${match.end}</span></div>` +
+        (periodFilter === "now" && left > 0 ? `<div class="rnext">あと${left}分</div>` : "");
+    }else{
+      const next = targetDay ? nextClassOf(room, targetDay, t) : null;
+      body =
+        `<div class="rstate"><span class="pip"></span>空室</div>` +
+        `<div class="rnext">${next
+          ? `次は <span class="time">${next.start}</span> から`
+          : (targetDay ? "この後の予定はありません" : "土日は授業がありません")}</div>`;
+    }
+
+    el.innerHTML =
+      `<div class="rcard-top">` +
+        `<span class="rname">${escapeHtml(room)}</span>` +
+        `<span class="bldg bldg-${bld}">${BUILDINGS[bld]}</span>` +
+      `</div>` + body;
+    return el;
+  }
+
+  function section(title, cls, items){
+    if(items.length === 0) return;
+    const head = document.createElement("div");
+    head.className = "sec-head " + cls;
+    head.innerHTML = `<h3>${title}</h3><span class="n">${items.length}</span>`;
+    list.appendChild(head);
+
+    const grid = document.createElement("div");
+    grid.className = "grid-cards";
+    items.forEach(({room, match}) => grid.appendChild(card(room, match)));
+    list.appendChild(grid);
+  }
+
+  if(statusFilter === "all"){
+    section("使用中", "busy", inUse);
+    section("空室", "free", free);
+  }else if(statusFilter === "inuse"){
+    if(inUse.length === 0){
+      list.innerHTML = `<p class="empty-note">この時間に使用中の部屋はありません。</p>`;
+    }else{
+      section("使用中", "busy", inUse);
+    }
+  }else{
+    if(free.length === 0){
+      list.innerHTML = `<p class="empty-note">この時間に空いている部屋はありません。</p>`;
+    }else{
+      section("空室", "free", free);
+    }
+  }
+}
+
+/* ---------- 一覧表（部屋 × 1〜5限） ---------- */
+function renderMatrix(list, visible){
+  const targetDay = viewDayIndex >= 0 ? DAYS[viewDayIndex] : null;
+
+  if(!targetDay){
+    list.innerHTML = `<p class="empty-note">土日は授業がありません。曜日を選ぶとその日の一覧を表示します。</p>`;
+    return;
+  }
+
+  // 状態で絞り込む場合は、選んだ時限（現在なら現在時刻）での状態で判定する
+  const t = effectiveTime();
+  let target = visible;
+  if(statusFilter !== "all"){
+    target = visible.filter(room => {
+      const busy = !!classAt(room, targetDay, t);
+      return statusFilter === "inuse" ? busy : !busy;
+    });
+  }
+
+  if(target.length === 0){
+    list.innerHTML = `<p class="empty-note">${statusFilter === "inuse"
+      ? "この時間に使用中の部屋はありません。" : "この時間に空いている部屋はありません。"}</p>`;
+    return;
+  }
+
+  const table = document.createElement("table");
+  table.className = "matrix";
+
+  const activeP = periodFilter === "now" ? currentPeriodNumber() : Number(periodFilter);
+
+  const thead = document.createElement("thead");
+  thead.innerHTML = "<tr><th style=\"text-align:left;padding-left:12px\">部屋</th>" +
+    PERIODS.map(p => `<th class="${p.n === activeP ? "now" : ""}">${p.n}限<br><span style="font-weight:400;font-size:10px">${p.start}</span></th>`).join("") +
+    "</tr>";
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  target.forEach(room => {
+    const tr = document.createElement("tr");
+    const bld = buildingOf(room);
+    const rc = document.createElement("td");
+    rc.className = "mroom";
+    rc.innerHTML = `<span class="n">${escapeHtml(room)}</span> <span class="bldg bldg-${bld}">${BUILDINGS[bld]}</span>`;
+    tr.appendChild(rc);
+
+    PERIODS.forEach(p => {
+      const m = classAt(room, targetDay, p.start);
+      const td = document.createElement("td");
+      td.className = "slot " + (m ? "busy" : "free");
+      if(m){
+        td.innerHTML = `<span class="mark">使用中</span><span class="sub">${escapeHtml(m.content)}</span>`;
+        td.title = m.content + (m.owner ? "（" + m.owner + "）" : "");
+      }else{
+        td.innerHTML = `<span class="mark">空</span>`;
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+
+  const box = document.createElement("div");
+  box.className = "matrix-wrap";
+  box.appendChild(table);
+  list.appendChild(box);
+
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  legend.innerHTML =
+    `<span><i class="lf"></i>空室</span><span><i class="lb"></i>使用中</span>` +
+    `<span>${targetDay}曜日 / ${target.length}部屋</span>`;
+  list.appendChild(legend);
+}
+
+/* 現在時刻が何限かを返す（授業時間外は0） */
+function currentPeriodNumber(){
+  const t = viewTime;
+  const p = PERIODS.find(x => isNowWithin(x.start, x.end, t));
+  return p ? p.n : 0;
+}
+
+function setupPeriodFilter(){
+  document.querySelectorAll("#periodFilter .seg-btn").forEach(btn => {
+    btn.addEventListener("click", ()=>{
+      document.querySelectorAll("#periodFilter .seg-btn").forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      periodFilter = btn.dataset.period;
+
+      if(periodFilter === "now"){
+        // 「現在」に戻したらリアルタイム表示に復帰する
+        liveMode = true;
+        viewDayIndex = todayDaysIndex();
+        viewTime = nowHM();
+        syncPickers();
+      }else{
+        // 時限を選んだら、その時限の時刻に合わせる
+        liveMode = false;
+        if(viewDayIndex < 0) viewDayIndex = 0;
+        viewTime = PERIODS[Number(periodFilter) - 1].start;
+        syncPickers();
+      }
+      updateModeLabel();
+      renderBoard();
+    });
+  });
+}
+
+function setupViewMode(){
+  document.querySelectorAll("#viewMode .seg-btn").forEach(btn => {
+    btn.addEventListener("click", ()=>{
+      document.querySelectorAll("#viewMode .seg-btn").forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      viewMode = btn.dataset.view;
+      renderBoard();
+    });
+  });
+}
+
+/* 時限ボタンの選択状態を「現在」に戻す（時刻を直接いじったとき用） */
+function resetPeriodButtons(){
+  periodFilter = "now";
+  document.querySelectorAll("#periodFilter .seg-btn").forEach(b=>{
+    b.classList.toggle("active", b.dataset.period === "now");
+  });
+}
+
+function setupStatusFilter(){
+  document.querySelectorAll("#statusFilter .seg-btn").forEach(btn => {
+    btn.addEventListener("click", ()=>{
+      document.querySelectorAll("#statusFilter .seg-btn").forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      statusFilter = btn.dataset.status;
+      renderBoard();
+    });
+  });
+}
+
+/* =========================================================
+   検索・建物フィルタ
+========================================================= */
+function setupSearch(){
+  const input = document.getElementById("roomSearch");
+  const clearBtn = document.getElementById("btnClearSearch");
+
+  input.addEventListener("input", ()=>{
+    searchTerm = input.value.trim();
+    onFilterChange();
+  });
+  clearBtn.addEventListener("click", ()=>{
+    searchTerm = "";
+    input.value = "";
+    onFilterChange();
+  });
+}
+
+function setupBuildingFilter(){
+  document.querySelectorAll("#buildingFilter .seg-btn").forEach(btn => {
+    btn.addEventListener("click", ()=>{
+      document.querySelectorAll("#buildingFilter .seg-btn").forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      buildingFilter = btn.dataset.building;
+      onFilterChange();
+    });
+  });
+}
+
+function updateBuildingCounts(){
+  const counts = {all: rooms.length, lecture: 0, lab: 0, other: 0};
+  rooms.forEach(r => counts[buildingOf(r)]++);
+  Object.keys(counts).forEach(k => {
+    const el = document.getElementById("cnt-" + k);
+    if(el) el.textContent = counts[k];
+  });
+}
+
+function onFilterChange(){
+  renderBoard();
+  const visible = visibleRooms();
+  if(visible.length && !visible.includes(selectedRoom)){
+    selectedRoom = visible[0];
+  }
+  buildRoomChips();
+  renderRoomTable();
+}
+
+/* =========================================================
+   部屋ごとの時間割
+========================================================= */
+function buildRoomChips(){
+  const wrap = document.getElementById("roomSelect");
+  wrap.innerHTML = "";
+
+  const visible = visibleRooms();
+  if(visible.length === 0){
+    wrap.innerHTML = `<p class="empty-note">条件に合う部屋が見つかりません。検索語や建物の絞り込みを変えてみてください。</p>`;
+    return;
+  }
+
+  ["lecture","lab","other"].forEach(key => {
+    const list = visible.filter(r => buildingOf(r) === key);
+    if(list.length === 0) return;
+
+    const group = document.createElement("div");
+    group.className = "room-group";
+
+    const title = document.createElement("div");
+    title.className = "room-group-title";
+    title.innerHTML = `<span>${BUILDINGS[key]}</span><span class="mono" style="font-weight:400">${list.length}室</span>`;
+    group.appendChild(title);
+
+    const row = document.createElement("div");
+    row.className = "room-chips";
+    list.forEach(room => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "room-chip" + (room === selectedRoom ? " active" : "");
+      btn.textContent = room;
+      btn.addEventListener("click", ()=>{
+        selectedRoom = room;
+        buildRoomChips();
+        renderRoomTable();
+      });
+      row.appendChild(btn);
+    });
+    group.appendChild(row);
+    wrap.appendChild(group);
+  });
+}
+
+function renderRoomTable(){
+  const wrap = document.getElementById("roomTableWrap");
+  wrap.innerHTML = "";
+  if(!selectedRoom) return;
+
+  const roomEntries = entries.filter(e => e.room === selectedRoom);
+  const bld = buildingOf(selectedRoom);
+
+  const head = document.createElement("div");
+  head.className = "room-head";
+  head.innerHTML =
+    `<span class="rh-name">${escapeHtml(selectedRoom)}</span>` +
+    `<span class="bldg bldg-${bld}">${BUILDINGS[bld]}</span>` +
+    `<span class="rh-sub">週${roomEntries.length}コマ</span>`;
+  wrap.appendChild(head);
+
+  const rows = PERIODS.map(p => ({label:`${p.n}限`, start:p.start, end:p.end}));
+  const todayIdx = todayDaysIndex();
+
+  const table = document.createElement("table");
+  table.className = "grid";
+
+  const thead = document.createElement("thead");
+  thead.innerHTML = "<tr><th>時限</th>" + DAYS.map((d,i)=>
+    `<th class="${i===todayIdx ? "today" : ""}">${d}</th>`).join("") + "</tr>";
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  const skip = DAYS.map(()=>0);
+
+  const findMatch = (day,row) =>
+    roomEntries.find(e => e.day === day && e.start === row.start && e.end === row.end);
+  const key = m => m ? (m.content + "||" + m.owner) : null;
+
+  rows.forEach((row, rowIdx) => {
+    const tr = document.createElement("tr");
+
+    const tCell = document.createElement("td");
+    tCell.className = "timecol";
+    tCell.innerHTML = `<span class="p">${row.label}</span><span class="t">${row.start}<br>${row.end}</span>`;
+    tr.appendChild(tCell);
+
+    DAYS.forEach((d, i) => {
+      if(skip[i] > 0){ skip[i]--; return; }
+
+      const match = findMatch(d, row);
+      let rowSpan = 1;
+
+      // 連続する時限で同じ授業が続く場合はまとめる
+      if(match){
+        const k = key(match);
+        let j = rowIdx + 1;
+        while(j < rows.length && key(findMatch(d, rows[j])) === k){ rowSpan++; j++; }
+        if(rowSpan > 1) skip[i] = rowSpan - 1;
+      }
+
+      const td = document.createElement("td");
+      td.className = (i===todayIdx ? "today-col " : "") + (match ? "filled" : "empty-cell");
+      if(rowSpan > 1) td.rowSpan = rowSpan;
+      if(match){
+        td.innerHTML = `<div class="cell-title">${escapeHtml(match.content) || "利用あり"}</div>` +
+          (match.owner ? `<div class="cell-owner">${escapeHtml(match.owner)}</div>` : "");
+      }else{
+        td.textContent = "—";
+      }
+      tr.appendChild(td);
+    });
+
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  const box = document.createElement("div");
+  box.className = "table-wrap";
+  box.appendChild(table);
+  wrap.appendChild(box);
+}
+
+/* =========================================================
+   タブ
+========================================================= */
+function setupTabs(){
+  document.querySelectorAll("#tabs .seg-btn").forEach(btn => {
+    btn.addEventListener("click", ()=>{
+      document.querySelectorAll("#tabs .seg-btn").forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      document.querySelectorAll(".panel").forEach(p=>{ p.hidden = true; });
+      document.getElementById(btn.dataset.panel).hidden = false;
+    });
+  });
+}
+
+function escapeHtml(s){
+  return String(s ?? "").replace(/[&<>"']/g, ch => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[ch]));
+}
+
+/* =========================================================
+   初期化
+========================================================= */
+function init(){
+  viewDayIndex = todayDaysIndex();
+  viewTime = nowHM();
+  setupTabs();
+  setupPickers();
+  setupSearch();
+  setupStatusFilter();
+  setupBuildingFilter();
+  setupPeriodFilter();
+  setupViewMode();
+  updateModeLabel();
+  tickClock();
+  setInterval(tickClock, 1000);
+  loadSchedule();
+}
+init();
+</script>
+</body>
+</html>
