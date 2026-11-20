@@ -154,4 +154,105 @@ t("連続コマのまとめ（休み10分はまとめる・昼休みはまとめ
   assert.strictEqual(K.roomStatus(list, "A", 725).state, "free"); // 2限と3限の間（昼休み）は空き
   assert.strictEqual(K.roomStatus(list, "A", 625).state, "busy"); // 1限と2限の間の休み時間は使用中のまま
 });
+
+/* ---------- 期間（クォーター） ---------- */
+const termBook = () => ({
+  terms: {name:"期間", offset:0, aoa:[["シート","開始日","終了日"],["3Q","2026/10/01","2026/11/30"],["4Q",46357,"2027/2/10"],["5Q","2027/4/1","2027/5/31"]]},
+  sheets: {
+    "3Q": {name:"3Q", offset:0, aoa:[["部屋","曜日","時限","内容","担当者"],["1101","月",1,"情報A","山田"],["1101","火",2,"英語","",],["1101","謎",1,"x",""]]},
+    "４Ｑ": {name:"４Ｑ", offset:0, aoa:[["部屋","曜日","日付","時限","内容"],["1101","月","",1,"数学B"],["1101","","2027/03/01",1,""]]},
+  },
+  schedule: {name:"時間割", offset:0, aoa:[["部屋","曜日","開始","終了","内容"],["1101","水","9:00","10:00","共通ゼミ"]]},
+});
+t("期間シート: 列名の読み分け（開始日・終了日と開始・終了）", () => {
+  const r = K.parseTermTable([["期間","期間開始","期間終了"],["2Q","2026-06-10","2026/8/5"],["bad","x",""],["逆","2026/9/2","2026/9/1"]], {sheet:"期間"});
+  assert.deepStrictEqual(r.terms, [{name:"2Q",from:"2026-06-10",to:"2026-08-05"}]);
+  assert.strictEqual(r.issues.length, 2);
+  assert.ok(r.issues.every(i => i.sheet === "期間"));
+  // 時間割の列名「開始」「終了」だけの表は期間の表とみなさない
+  assert.strictEqual(K.parseTermTable([["シート","開始","終了"],["2Q","2026/6/1","2026/8/1"]]).terms.length, 0);
+});
+t("期間シート: 各シートを読んで期間を付ける", () => {
+  const r = K.parseTables(termBook(), {defaultPeriods:P});
+  assert.deepStrictEqual(r.terms, [{name:"3Q",from:"2026-10-01",to:"2026-11-30"},{name:"４Ｑ",from:"2026-12-01",to:"2027-02-10"}]);
+  assert.strictEqual(r.entries.length, 5); // 3Q 2件 + 4Q 2件 + 共通 1件
+  const by = (t) => r.entries.filter(e => e.term === t).map(e => e.title);
+  assert.deepStrictEqual(by("3Q"), ["情報A","英語"]);
+  assert.deepStrictEqual(by("４Ｑ"), ["数学B",""]);
+  assert.deepStrictEqual(by(null), ["共通ゼミ"]);
+  assert.strictEqual(r.entries[0].termFrom, "2026-10-01");
+  assert.strictEqual(r.entries[0].termTo, "2026-11-30");
+  // 読めない行・期間外の日付・見つからないシートは、どのシートかが分かる
+  const msg = r.issues.map(i => `${i.sheet}:${i.row||""}:${i.level}`);
+  assert.ok(msg.includes("3Q:4:error"), msg.join());
+  assert.ok(msg.includes("４Ｑ:3:warn"), msg.join()); // 2027/03/01 は 4Q の外
+  assert.ok(r.issues.some(i => i.sheet === "期間" && /5Q/.test(i.msg)));
+  // 期間シートがない時は今まで通り
+  const plain = K.parseTables({schedule: termBook().schedule}, {});
+  assert.deepStrictEqual(plain.terms, []);
+  assert.strictEqual(plain.entries[0].term, null);
+});
+t("期間: entriesOn は期間の境目で切り替わる", () => {
+  const r = K.parseTables(termBook(), {defaultPeriods:P});
+  const titles = (y,m,d) => K.entriesOn(r.entries, new Date(y,m-1,d)).map(e => e.title);
+  assert.deepStrictEqual(titles(2026,11,30), ["情報A"]);   // 3Q 最終日（月）
+  assert.deepStrictEqual(titles(2026,12,7), ["数学B"]);    // 4Q（月）
+  assert.deepStrictEqual(titles(2026,9,28), []);           // どの期間でもない月曜
+  assert.deepStrictEqual(titles(2026,9,30), ["共通ゼミ"]); // 期間のない予定はいつでも
+  assert.strictEqual(K.termFor(r.terms, new Date(2026,11,1)).name, "４Ｑ");
+  assert.strictEqual(K.termFor(r.terms, "2026-09-30"), null);
+  const c = K.termContext(r.terms, "2026-09-30");
+  assert.strictEqual(c.next.name, "3Q"); assert.strictEqual(c.prev, null);
+  assert.strictEqual(K.termLabel(r.terms[0]), "3Q（10/1〜11/30）");
+});
+t("期間: 期間が重ならない予定は重複扱いしない", () => {
+  const a = {id:"a",room:"A",day:0,date:null,start:540,end:630,title:"3Q",term:"3Q",termFrom:"2026-10-01",termTo:"2026-11-30"};
+  const b = {id:"b",room:"A",day:0,date:null,start:540,end:630,title:"4Q",term:"4Q",termFrom:"2026-12-01",termTo:"2027-02-10"};
+  const c = {id:"c",room:"A",day:0,date:null,start:600,end:660,title:"共通"};
+  const d = {id:"d",room:"A",day:0,date:"2026-12-07",start:540,end:600,title:"臨時"};
+  assert.deepStrictEqual(K.findConflicts([a,b]).length, 0);
+  assert.deepStrictEqual(K.findConflicts([a,b,c]).map(([x,y]) => x.id+y.id), ["ac","bc"]);
+  assert.deepStrictEqual(K.findConflicts([a,b,d]).map(([x,y]) => x.id+y.id), ["bd"]); // 12/7 は 4Q だけ
+  assert.deepStrictEqual(K.overlapsWith([a,b], {room:"A",day:0,date:null,start:540,end:600,termFrom:"2026-10-01",termTo:"2026-11-30"}).map(e => e.id), ["a"]);
+});
+t("期間: JSON・CSV の往復", () => {
+  const r = K.parseTables(termBook(), {defaultPeriods:P});
+  const json = JSON.parse(JSON.stringify(K.toJSON(r.entries, K.compileRooms([], r.entries), P, r.terms)));
+  assert.strictEqual(json.terms.length, 2);
+  const back = K.parseTables(K.jsonToTables(json), {});
+  assert.deepStrictEqual(back.terms, r.terms);
+  const q4 = back.entries.find(e => e.title === "数学B");
+  assert.deepStrictEqual([q4.term, q4.termFrom, q4.termTo], ["４Ｑ","2026-12-01","2027-02-10"]);
+  assert.strictEqual(back.entries.find(e => e.title === "共通ゼミ").term, null);
+  // 期間のないデータの JSON には term が付かない
+  assert.ok(!("terms" in K.toJSON([], [], [])));
+  // CSV は期間名だけ（日付は付かない）
+  const csv = K.toScheduleAoa(r.entries, [], {term:true});
+  assert.strictEqual(csv[0][8], "期間");
+  const fromCsv = K.parseTables({schedule:{aoa:K.parseDelimited(K.toCSV(csv)), offset:0}}, {});
+  assert.strictEqual(fromCsv.entries.find(e => e.title === "情報A").term, "3Q");
+  assert.strictEqual(fromCsv.entries.find(e => e.title === "情報A").termFrom, null);
+  // 期間の一覧を当てはめると日付が付く
+  K.applyTerms(fromCsv.entries, r.terms);
+  assert.strictEqual(fromCsv.entries.find(e => e.title === "情報A").termTo, "2026-11-30");
+  assert.deepStrictEqual(K.toTermsAoa(r.terms)[1], ["3Q","2026/10/01","2026/11/30"]);
+});
+t("期間: parseWorkbook（SheetJS の代わりに簡単な偽物を使う）", () => {
+  const fakeX = {utils:{decode_range:() => ({s:{r:0}}), sheet_to_json:(ws) => ws.aoa}};
+  const book = (sheets) => ({SheetNames:Object.keys(sheets), Sheets:Object.fromEntries(Object.entries(sheets).map(([k,aoa]) => [k, {"!ref":"A1", aoa}]))});
+  const tb = termBook();
+  const wb = book({"期間":tb.terms.aoa, "3Q":tb.sheets["3Q"].aoa, "4Q":tb.sheets["４Ｑ"].aoa, "部屋":[["部屋","定員"],["1101",40]]});
+  const r = K.parseWorkbook(wb, fakeX, {defaultPeriods:P});
+  assert.deepStrictEqual(r.terms.map(x => x.name), ["3Q","4Q"]); // 期間シートの「４Ｑ」は実際のシート名「4Q」になる
+  assert.strictEqual(r.entries.length, 4);
+  assert.strictEqual(r.rooms[0].capacity, 40);
+  // 期間シートはあるが、書かれたシートが1つもない → 今まで通り時間割を読む＋注意
+  const r2 = K.parseWorkbook(book({"時間割":tb.schedule.aoa, "期間":[["シート","開始日","終了日"],["9Q","2026/1/1","2026/2/1"]]}), fakeX, {});
+  assert.deepStrictEqual(r2.terms, []);
+  assert.strictEqual(r2.entries.length, 1);
+  assert.ok(r2.issues.some(i => i.sheet === "期間" && i.level === "warn"));
+  // 期間シートがなければ今まで通り
+  const r3 = K.parseWorkbook(book({"時間割":tb.schedule.aoa}), fakeX, {});
+  assert.deepStrictEqual([r3.entries.length, r3.terms.length, r3.issues.length], [1, 0, 0]);
+});
 console.log(`OK: ${n} テストすべて成功`);

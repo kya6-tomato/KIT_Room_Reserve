@@ -96,13 +96,46 @@
   const norm = (s) => kana(K.nfkc(s).toLowerCase());
   const terms = (q) => norm(q).split(/\s+/).filter(Boolean);
   const matchAll = (hay, ts) => { const h = norm(hay); return ts.every((t) => h.includes(t)); };
-  const entryHay = (e) => [e.room, e.title, e.owner, e.note, K.DAYS[e.day] + "曜", e.date || ""].join(" ");
+  const entryHay = (e) => [e.room, e.title, e.owner, e.note, K.DAYS[e.day] + "曜", e.date || "", e.term || ""].join(" ");
   const roomHay = (r) => [r.name, r.building, r.note].join(" ");
   const roomByName = (name) => S.ds.rooms.find((r) => r.name === name);
   const roomMeta = (r) => r ? [r.building, r.capacity != null ? `定員${r.capacity}` : "", r.note].filter(Boolean).join(" · ") : "";
   const entryById = (id) => S.ds.entries.find((e) => e.id === id);
   const whenLabel = (e) => (e.date ? `${K.fmtDate(K.parseYmd(e.date), true)} のみ` : `毎週${K.DAYS[e.day]}曜日`);
   const conflictIds = () => new Set(S.ds.conflicts.flatMap(([a, b]) => [a.id, b.id]));
+
+  /* ---------- 期間（クォーター） ---------- */
+  const hasTerms = () => S.ds.terms.length > 0;
+  const termByName = (name) => (name ? S.ds.terms.find((t) => t.name === name) : null);
+  /** いま見ている日付（画面ごと） */
+  function viewDate() {
+    if (S.tab === "week") return S.weekDate;
+    if (S.tab === "free" && S.free) return S.free.date;
+    return S.date;
+  }
+  /** その日がどの期間にも入っていない時の案内文（入っていれば空） */
+  function offTermText(date) {
+    if (!hasTerms()) return "";
+    const c = K.termContext(S.ds.terms, date);
+    if (c.current) return "";
+    const tail = c.next ? `（${c.next.name} は ${K.fmtYmd(c.next.from)} から）`
+      : c.prev ? `（${c.prev.name} は ${K.fmtYmd(c.prev.to)} で終わりました）` : "";
+    return `${K.fmtDate(date)} は授業期間外です${tail}`;
+  }
+  /** 日付バーの下に「授業期間外」の案内を出す（いまの状況・タイムライン） */
+  function renderTermNote(panelSel, date) {
+    const panel = $(panelSel);
+    const text = offTermText(date);
+    let el = $(".term-note", panel);
+    if (!text) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "term-note";
+      el.setAttribute("role", "status");
+      $(".datebar-slot", panel).after(el);
+    }
+    el.textContent = text;
+  }
 
   function withFocus(fn) {
     const a = document.activeElement;
@@ -243,7 +276,10 @@
   }
 
   function signature(raw) {
-    const s = JSON.stringify([raw.entries.map((e) => [e.room, e.day, e.date, e.start, e.end, e.title, e.owner, e.note]), raw.rooms, raw.periods]);
+    // 期間のないデータでは以前と同じ値になるよう、期間があるときだけ含める
+    const parts = [raw.entries.map((e) => [e.room, e.day, e.date, e.start, e.end, e.title, e.owner, e.note, ...(e.term ? [e.term] : [])]), raw.rooms, raw.periods];
+    if (raw.terms && raw.terms.length) parts.push(raw.terms);
+    const s = JSON.stringify(parts);
     let h = 5381;
     for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
     return (h >>> 0).toString(36);
@@ -298,10 +334,14 @@
     }
     // 編集中のデータは時限を全部消した状態も尊重する。公開データは時限シートがなければ config.js の定義
     const periods = isDraft ? raw.periods || [] : raw.periods && raw.periods.length ? raw.periods : DEFAULT_PERIODS;
+    // 期間（クォーター）の日付は期間の一覧から付け直す（一覧にない期間名の予定はいつでも表示）
+    const terms = raw.terms || [];
+    K.applyTerms(entries, terms);
     return {
       entries,
       rooms,
       periods,
+      terms,
       issues: raw.issues || [],
       conflicts: K.findConflicts(entries),
       hasWeekend: entries.some((e) => e.day >= 5),
@@ -311,7 +351,7 @@
   }
 
   function refreshDataset() {
-    S.ds = makeDataset(S.draft || S.published || { entries: [], rooms: [], periods: [] }, !!S.draft);
+    S.ds = makeDataset(S.draft || S.published || { entries: [], rooms: [], periods: [], terms: [] }, !!S.draft);
     mergedView.clear();
     if (S.free && S.free.anchor != null && !S.ds.periods[S.free.anchor]) S.free.anchor = null;
     if (S.formCtx && S.formCtx.anchor != null && !S.ds.periods[S.formCtx.anchor]) S.formCtx.anchor = null;
@@ -393,8 +433,19 @@
   function renderTab() {
     const fn = { now: renderNow, timeline: renderTimeline, week: renderWeek, free: renderFree, edit: renderEdit }[S.tab];
     withFocus(fn);
+    // 表示している日付が変わると期間（クォーター）の表示も変わる
+    if (hasTerms()) renderNotices();
   }
 
+  /** お知らせ欄の先頭に出す、表示中の日付の期間（例: 3Q（10/1〜11/30）） */
+  function termPrefix() {
+    if (!hasTerms()) return "";
+    const c = K.termContext(S.ds.terms, viewDate());
+    if (c.current) return K.termLabel(c.current);
+    return c.next ? `授業期間外（次は ${K.termLabel(c.next)}）` : "授業期間外";
+  }
+
+  let lastNotices = null;
   function renderNotices() {
     const out = [];
     if (S.loading) out.push(`<div class="notice info">データを読み込み中です…</div>`);
@@ -411,13 +462,19 @@
       out.push(`<div class="notice draft"><span class="grow"><b>✎ このブラウザで編集中のデータを表示しています。</b> まだ他の人には見えません。${stale ? "<br>※ 編集を始めた後に公開データが更新されています。" : ""}</span>
         <button class="btn" type="button" data-act="export-xlsx">Excel に書き出す</button>
         <button class="btn" type="button" data-act="discard-draft">編集をやめて公開データに戻す</button></div>`);
-    } else if (S.published && !S.draft) {
+    }
+    const tp = termPrefix();
+    if (S.published && !S.draft) {
       const errs = S.ds.issues.filter((i) => i.level === "error").length;
       const t = S.published.loadedAt;
-      out.push(`<div class="notice info"><span>${S.ds.entries.length}件の予定 / ${S.ds.rooms.length}部屋 · ${esc(S.published.src)} · ${K.pad2(t.getHours())}:${K.pad2(t.getMinutes())} 読み込み</span>
+      out.push(`<div class="notice info"><span>${tp ? `<b class="term-now">${esc(tp)}</b> · ` : ""}${S.ds.entries.length}件の予定 / ${S.ds.rooms.length}部屋 · ${esc(S.published.src)} · ${K.pad2(t.getHours())}:${K.pad2(t.getMinutes())} 読み込み</span>
         ${errs ? `<button class="btn small danger" type="button" data-act="goto-issues">読み取れない行が ${errs} 件あります</button>` : ""}</div>`);
+    } else if (tp) {
+      out.push(`<div class="notice info"><span><b class="term-now">${esc(tp)}</b> · ${S.ds.entries.length}件の予定 / ${S.ds.rooms.length}部屋</span></div>`);
     }
-    $("#notices").innerHTML = out.join("");
+    const html = out.join("");
+    // 毎分の再描画でボタンのフォーカスが外れないよう、内容が変わった時だけ書き換える
+    if (html !== lastNotices) { $("#notices").innerHTML = html; lastNotices = html; }
   }
 
   function renderSearchResults() {
@@ -433,7 +490,7 @@
     box.innerHTML = `<details class="search-results" ${hits.length <= 8 ? "open" : ""}>
       <summary>「${esc(S.query)}」の検索結果: 部屋 ${rooms.length}件 · 予定 ${hits.length}件（下の表示も絞り込まれています）</summary>
       <ul>${hits.slice(0, 100).map((e) => `<li><button type="button" data-act="entry" data-id="${esc(e.id)}">
-        <span>${esc(e.room)}</span><span class="sr-time">${e.date ? esc(e.date.slice(5).replace("-", "/")) : K.DAYS[e.day] + "曜"} ${fm(e.start)}–${fm(e.end)}</span>
+        <span>${esc(e.room)}</span><span class="sr-time">${e.term && hasTerms() ? `<span class="term-tag">${esc(e.term)}</span>` : ""}${e.date ? esc(e.date.slice(5).replace("-", "/")) : K.DAYS[e.day] + "曜"} ${fm(e.start)}–${fm(e.end)}</span>
         <span><b>${esc(e.title || "（内容未設定）")}</b> <span class="muted">${esc(e.owner)}</span></span></button></li>`).join("")}</ul>
     </details>`;
   }
@@ -493,6 +550,7 @@
 
   function renderNow() {
     renderDatebar($("#panel-now .datebar-slot"));
+    renderTermNote("#panel-now", S.date);
     const list = dayEntries(S.date, { withCancelled: true });
     const [t0, t1] = timeRange(list);
     let rows = visibleRooms().map((r) => ({ r, st: K.roomStatus(list, r.name, S.min, CFG.soonMinutes) }));
@@ -621,6 +679,7 @@
 
   function renderTimeline() {
     renderDatebar($("#panel-timeline .datebar-slot"));
+    renderTermNote("#panel-timeline", S.date);
     if (S.tlMode === "matrix" && S.ds.periods.length && S.ds.rooms.length) { renderMatrix($("#timeline")); return; }
     const list = dayEntries(S.date, { withCancelled: true });
     const [t0, t1] = timeRange(list);
@@ -689,8 +748,14 @@
     const td = today();
     const days = [...Array(nDays)].map((_, i) => {
       const date = K.addDays(ws, i);
-      return { date, i, list: dayEntries(date, { withCancelled: true }).filter((e) => e.room === room.name) };
+      // off: どの期間（クォーター）にも入らない日
+      return { date, i, off: hasTerms() && !K.termFor(S.ds.terms, date), list: dayEntries(date, { withCancelled: true }).filter((e) => e.room === room.name) };
     });
+    // この週にかかる期間（例: 「3Q」「3Q / 4Q」）
+    const weekTerms = hasTerms() ? S.ds.terms.filter((t) => t.from <= K.ymd(days[days.length - 1].date) && K.ymd(ws) <= t.to) : [];
+    const termBadge = !hasTerms() ? ""
+      : weekTerms.length ? `<span class="term-badge" title="${esc(weekTerms.map((t) => K.termLabel(t, true)).join(" / "))}">${esc(weekTerms.map((t) => K.termLabel(t)).join(" / "))}${days.some((d) => d.off) ? "・一部期間外" : ""}</span>`
+      : `<span class="term-badge off" title="${esc(offTermText(ws))}">授業期間外</span>`;
     const all = days.flatMap((d) => d.list);
     const [t0, t1] = timeRange(all);
     const H = 52;
@@ -712,14 +777,15 @@
         return blockHTML(e, style, cids, n > 1 ? "narrow" : "");
       }).join("");
       const now = isToday && nowMin() >= t0 && nowMin() <= t1 ? `<div class="tl-now" style="top:${((nowMin() - t0) / 60) * H}px"></div>` : "";
-      return `<div class="wg-col${isToday ? " today" : ""}" style="height:${height}px;background-image:linear-gradient(to bottom, var(--line) 1px, transparent 1px);background-size:100% ${H}px"
+      return `<div class="wg-col${isToday ? " today" : ""}${d.off ? " off-term" : ""}" style="height:${height}px;background-image:linear-gradient(to bottom, var(--line) 1px, transparent 1px);background-size:100% ${H}px"
         data-act="slot" data-room="${esc(room.name)}" data-date="${K.ymd(d.date)}" data-t0="${t0}" data-t1="${t1}">${blocks}${now}</div>`;
     }).join("");
 
-    const head = days.map((d) => `<div class="wg-day${K.sameDay(d.date, td) ? " today" : ""}">${K.DAYS[d.i]}<small>${d.date.getMonth() + 1}/${d.date.getDate()}</small></div>`).join("");
+    const offMark = (d) => (d.off ? `<em class="off-mark" title="${esc(offTermText(d.date))}">期間外</em>` : "");
+    const head = days.map((d) => `<div class="wg-day${K.sameDay(d.date, td) ? " today" : ""}${d.off ? " off-term" : ""}">${K.DAYS[d.i]}<small>${d.date.getMonth() + 1}/${d.date.getDate()}</small>${offMark(d)}</div>`).join("");
 
     const listView = days.map((d) => `<div class="wl-day${K.sameDay(d.date, td) ? " today" : ""}">
-      <h3>${K.DAYS[d.i]}曜日 <small>${d.date.getMonth() + 1}/${d.date.getDate()}</small></h3>
+      <h3>${K.DAYS[d.i]}曜日 <small>${d.date.getMonth() + 1}/${d.date.getDate()}</small>${offMark(d)}</h3>
       ${d.list.length ? d.list.map((e) => `<button type="button" class="wl-item${e.date ? " dated" : ""}${e.cancelled ? " cancelled" : ""}" data-act="entry" data-id="${esc(e.id)}">
         <span class="t">${fm(e.start)}–${fm(e.end)}</span><span><b>${e.cancelled ? "休講 " : ""}${esc(e.title || "（内容未設定）")}</b> <span class="muted">${esc(e.owner)}</span></span></button>`).join("")
         : `<div class="wl-none">予定なし</div>`}
@@ -735,6 +801,7 @@
           <button class="btn small${thisWeek ? "" : " primary"}" type="button" data-act="shift-week" data-n="0" ${thisWeek ? "disabled" : ""}>今週</button>
           <button class="btn compact-icon" type="button" data-act="shift-week" data-n="1" title="次の週（→）" aria-label="次の週">›</button>
           <span class="week-label">${K.fmtDate(ws, true)} – ${K.fmtDate(K.addDays(ws, nDays - 1))}</span>
+          ${termBadge}
         </div>
         <button class="btn small no-print" type="button" data-act="print">印刷</button>
         ${S.editMode ? `<button class="btn small primary no-print" type="button" data-act="add-entry" data-room="${esc(room.name)}">＋ 予定を追加</button>` : ""}
@@ -822,7 +889,8 @@
 
     const card = (x, cls, body) => `<button type="button" class="room-card ${cls}" data-act="goto-room" data-room="${esc(x.r.name)}" data-date="${K.ymd(F.date)}">
       <span class="rc-name">${S.favorites.has(x.r.name) ? "★ " : ""}${esc(x.r.name)}</span>${roomMeta(x.r) ? `<span class="rc-meta">${esc(roomMeta(x.r))}</span>` : ""}${body}</button>`;
-    box.innerHTML = `
+    const off = offTermText(F.date);
+    box.innerHTML = `${off ? `<div class="term-note" role="status">${esc(off)}</div>` : ""}
       <div class="result-head"><h3><span class="dot free"></span> ずっと空いている部屋 ${full.length}</h3><span class="muted">${K.fmtDate(F.date, true)} ${fm(F.from)}–${fm(F.to)}</span></div>
       ${full.length ? `<div class="card-grid">${full.map((x) => card(x, "", `
         <span class="rc-line">${x.after ? `次の予定 <b>${fm(x.after.start)}</b> ${esc(x.after.title)}` : "この後の予定なし"}</span>
@@ -845,7 +913,7 @@
     const nIssue = issues.length + ds.conflicts.length + checks.length;
 
     const issueItems = [
-      ...ds.conflicts.map(([a, b]) => `<li><span class="lv conflict">重複</span><span>${esc(a.room)} ${a.date ? esc(a.date) : K.DAYS[a.day] + "曜"}:
+      ...ds.conflicts.map(([a, b]) => `<li><span class="lv conflict">重複</span><span>${hasTerms() && (a.term || b.term) ? `[${esc([...new Set([a.term || "共通", b.term || "共通"])].join("・"))}] ` : ""}${esc(a.room)} ${a.date ? esc(a.date) : K.DAYS[a.day] + "曜"}:
         「${esc(a.title)}」${fm(a.start)}–${fm(a.end)} と「${esc(b.title)}」${fm(b.start)}–${fm(b.end)} が重なっています</span>
         <button class="btn small" type="button" data-act="edit-entry" data-id="${esc(a.id)}">左を編集</button><button class="btn small" type="button" data-act="edit-entry" data-id="${esc(b.id)}">右を編集</button></li>`),
       ...checks.map((e) => `<li><span class="lv warn">要確認</span><span>${esc(e.room)} ${e.date ? esc(e.date) : K.DAYS[e.day] + "曜"} ${fm(e.start)}–${fm(e.end)}「${esc(e.title)}」${e.row ? `（${e.row}行目）` : ""} は読み取りが崩れている可能性があります</span>
@@ -864,6 +932,7 @@
           ${isDraft ? `<b>✎ このブラウザで編集中のデータ</b>（${K.pad2(saved.getHours())}:${K.pad2(saved.getMinutes())} 自動保存）`
             : `<b>公開データ（${esc(S.published ? S.published.src : "未読み込み")}）を表示中</b>`}
           <p>ここでの変更はこのブラウザにだけ自動保存されます。みんなに反映するには <b>「Excel に書き出す」</b> でできた schedule.xlsx を、サイトの schedule.xlsx と置き換えてください。</p>
+          ${hasTerms() ? `<p class="term-list">期間（クォーター）: ${ds.terms.map((t) => esc(K.termLabel(t, true))).join(" · ")}<br><span class="muted">期間の日付を変えるときは、Excel の「期間」シートを書き換えて取り込んでください。</span></p>` : ""}
         </div>
         ${isDraft ? `<button class="btn danger" type="button" data-act="discard-draft">編集を破棄</button>` : ""}
       </div>
@@ -903,6 +972,7 @@
             <option value="room" ${S.editSort === "room" ? "selected" : ""}>部屋順</option>
             <option value="day" ${S.editSort === "day" ? "selected" : ""}>曜日・時間順</option>
             <option value="title" ${S.editSort === "title" ? "selected" : ""}>内容順</option>
+            ${hasTerms() ? `<option value="term" ${S.editSort === "term" ? "selected" : ""}>期間順</option>` : ""}
           </select></div>` : ""}
       </div>
       ${body}`;
@@ -914,6 +984,10 @@
     const ts = terms(S.editQuery);
     const list = ds.entries.filter((e) => !ts.length || matchAll(entryHay(e), ts));
     if (S.editSort === "room") return K.sortEntries(list, ds.rooms.map((r) => r.name));
+    if (S.editSort === "term" && ds.terms.length) {
+      const ti = (e) => { const i = ds.terms.findIndex((t) => t.name === e.term); return i < 0 ? ds.terms.length : i; };
+      return K.sortEntries(list, ds.rooms.map((r) => r.name)).sort((a, b) => ti(a) - ti(b));
+    }
     if (S.editSort === "day") return list.sort((a, b) => a.day - b.day || a.start - b.start || a.room.localeCompare(b.room, "ja", { numeric: true }));
     return list.sort((a, b) => a.title.localeCompare(b.title, "ja") || a.day - b.day || a.start - b.start);
   }
@@ -946,13 +1020,15 @@
     const cids = conflictIds();
     const allSel = list.length > 0 && list.every((e) => S.selected.has(e.id));
     if (!ds.entries.length) return emptyData();
+    const withTerm = hasTerms();
+    const termCell = (e) => (!withTerm ? "" : `<td>${e.term ? `${esc(e.term)}${termByName(e.term) ? "" : '<span class="tag warn" title="「期間」シートにない期間名です（いつでも表示されます）">日付なし</span>'}` : '<span class="muted">共通</span>'}</td>`);
     return `<div class="table-wrap"><table class="data">
       <thead><tr><th class="chk"><input type="checkbox" data-bind="sel-all" ${allSel ? "checked" : ""} aria-label="表示中の予定をすべて選択"></th>
-        <th>部屋</th><th>いつ</th><th>時間</th><th>内容</th><th class="hide-sm">担当者</th><th class="hide-sm">備考</th><th></th></tr></thead>
+        <th>部屋</th>${withTerm ? "<th>期間</th>" : ""}<th>いつ</th><th>時間</th><th>内容</th><th class="hide-sm">担当者</th><th class="hide-sm">備考</th><th></th></tr></thead>
       <tbody>${list.slice(0, S.editLimit).map((e) => `<tr class="${S.selected.has(e.id) ? "sel" : ""}${/^⚠/.test(e.title) ? " needs-check" : ""}">
         <td class="chk"><input type="checkbox" data-bind="sel" data-id="${esc(e.id)}" ${S.selected.has(e.id) ? "checked" : ""} aria-label="選択"></td>
-        <td>${esc(e.room)}</td>
-        <td>${e.date ? `${esc(K.fmtDate(K.parseYmd(e.date), true))}<span class="tag">この日だけ</span>` : `毎週${K.DAYS[e.day]}`}${K.isCancel(e) ? '<span class="tag">取消</span>' : ""}</td>
+        <td>${esc(e.room)}</td>${termCell(e)}
+        <td>${e.date ?`${esc(K.fmtDate(K.parseYmd(e.date), true))}<span class="tag">この日だけ</span>` : `毎週${K.DAYS[e.day]}`}${K.isCancel(e) ? '<span class="tag">取消</span>' : ""}</td>
         <td class="t">${fm(e.start)}–${fm(e.end)}${cids.has(e.id) ? '<span class="tag warn" title="時間が重なっています">重複</span>' : ""}</td>
         <td>${esc(e.title)}</td><td class="hide-sm">${esc(e.owner)}</td><td class="hide-sm">${esc(e.note)}</td>
         <td class="acts"><button class="btn small" type="button" data-act="edit-entry" data-id="${esc(e.id)}">編集</button>
@@ -1002,9 +1078,13 @@
   function snapshotForDraft() {
     const ds = S.ds;
     return {
-      entries: ds.entries.map((e) => ({ id: e.id, room: e.room, day: e.day, date: e.date || null, start: e.start, end: e.end, title: e.title || "", owner: e.owner || "", note: e.note || "" })),
+      entries: ds.entries.map((e) => ({
+        id: e.id, room: e.room, day: e.day, date: e.date || null, start: e.start, end: e.end, title: e.title || "", owner: e.owner || "", note: e.note || "",
+        term: e.term || null, termFrom: e.termFrom || null, termTo: e.termTo || null,
+      })),
       rooms: ds.rooms.map((r) => ({ name: r.name, building: r.building || "", capacity: r.capacity ?? null, note: r.note || "" })),
       periods: ds.periods.map((p) => ({ name: p.name, start: p.start, end: p.end })),
+      terms: ds.terms.map((t) => ({ name: t.name, from: t.from, to: t.to })),
       baseSig: S.published ? S.published.sig : "",
       savedAt: Date.now(),
     };
@@ -1021,6 +1101,7 @@
     d.entries = d.entries.filter((e) => e && e.room && e.start != null && e.end != null).map((e) => K.makeEntry(e));
     d.rooms = Array.isArray(d.rooms) ? d.rooms : [];
     d.periods = Array.isArray(d.periods) ? d.periods : [];
+    d.terms = Array.isArray(d.terms) ? d.terms.filter((t) => t && t.name && K.parseYmd(t.from) && K.parseYmd(t.to)) : [];
     return d;
   }
 
@@ -1089,6 +1170,7 @@
     const ds = S.ds;
     const entries = template ? [] : ds.entries;
     const rooms = template ? [] : ds.rooms;
+    const terms = template ? [] : ds.terms;
     const order = rooms.map((r) => r.name);
     if (kind === "xlsx") {
       if (!window.XLSX) { toast("Excel 用のライブラリを読み込めていません。CSV で書き出してください", { error: true }); return; }
@@ -1098,17 +1180,36 @@
         ws["!cols"] = widths.map((w) => ({ wch: w }));
         XLSX.utils.book_append_sheet(wb, ws, name);
       };
-      add(K.toScheduleAoa(entries, order), "時間割", [16, 6, 12, 7, 7, 26, 12, 20]);
+      const SCHED_W = [16, 6, 12, 7, 7, 26, 12, 20];
+      if (terms.length) {
+        // 期間（クォーター）ごとのシート＋「期間」シート。Excel のシート名に使えない文字は置き換える
+        const used = new Set(["期間", "部屋", "時限", "使い方"]);
+        const sheetName = (name) => {
+          const base = String(name).replace(/[\\\/?*\[\]:]/g, "_").slice(0, 28) || "シート";
+          let n = base;
+          for (let i = 2; used.has(n); i++) n = `${base}(${i})`;
+          used.add(n);
+          return n;
+        };
+        const named = terms.map((t) => ({ ...t, sheet: sheetName(t.name) }));
+        const common = entries.filter((e) => !termByName(e.term));
+        add(K.toTermsAoa(named.map((t) => ({ ...t, name: t.sheet }))), "期間", [12, 12, 12]);
+        named.forEach((t) => add(K.toScheduleAoa(entries.filter((e) => e.term === t.name), order), t.sheet, SCHED_W));
+        if (common.length) add(K.toScheduleAoa(common, order), sheetName("時間割"), SCHED_W);
+      } else {
+        add(K.toScheduleAoa(entries, order), "時間割", SCHED_W);
+      }
       add(K.toRoomsAoa(rooms), "部屋", [16, 12, 6, 28]);
       add(K.toPeriodsAoa(ds.periods), "時限", [8, 7, 7]);
       add(K.USAGE_LINES.map((l) => [l]), "使い方", [110]);
       XLSX.writeFile(wb, "schedule.xlsx");
-      toast(template ? "空のテンプレートを書き出しました" : "schedule.xlsx を書き出しました。サイトの schedule.xlsx と置き換えると反映されます", { ms: 6000 });
+      toast(template ? "空のテンプレートを書き出しました"
+        : `schedule.xlsx を書き出しました${terms.length ? "（期間ごとのシートに分けています）" : ""}。サイトの schedule.xlsx と置き換えると反映されます`, { ms: 6000 });
     } else if (kind === "csv") {
-      download(K.toCSV(K.toScheduleAoa(entries, order)), "schedule.csv", "text/csv;charset=utf-8");
-      toast("schedule.csv を書き出しました（部屋・時限の設定は含まれません）");
+      download(K.toCSV(K.toScheduleAoa(entries, order, { term: terms.length > 0 })), "schedule.csv", "text/csv;charset=utf-8");
+      toast(`schedule.csv を書き出しました（部屋・時限${terms.length ? "・期間の日付" : ""}の設定は含まれません）`);
     } else {
-      download(JSON.stringify(K.toJSON(entries, rooms, ds.periods), null, 2), "schedule.json", "application/json");
+      download(JSON.stringify(K.toJSON(entries, rooms, ds.periods, terms), null, 2), "schedule.json", "application/json");
       toast("schedule.json を書き出しました");
     }
   }
@@ -1135,6 +1236,13 @@
     const overlaps = K.overlapsWith(S.ds.entries, e, [e.id]);
     const canEdit = S.editMode || S.tab === "edit";
     const ids = parts.map((p) => p.id).join(",");
+    const term = termByName(e.term);
+    // 毎週の予定を、その期間外の日付から開いた時は、期間の最初の週の時間割へ移動する
+    const vd = K.ymd(viewDate());
+    const jumpDate = e.date || (term && !(term.from <= vd && vd <= term.to) ? term.from : "");
+    const termRow = !hasTerms() ? ""
+      : term ? `<dt>期間</dt><dd>${esc(K.termLabel(term, true))}</dd>`
+      : `<dt>期間</dt><dd>${e.term ? `${esc(e.term)} <span class="muted">（日付の設定なし）</span>` : "すべての期間（共通）"}</dd>`;
     $("#detailBody").innerHTML = `
       <div class="detail-head">
         <div>
@@ -1147,6 +1255,7 @@
       <dl class="detail-list">
         <dt>部屋</dt><dd>${esc(e.room)}${roomMeta(r) ? ` <span class="muted">（${esc(roomMeta(r))}）</span>` : ""}</dd>
         <dt>いつ</dt><dd>${esc(whenLabel(e))}${cancelled ? ` <b style="color:var(--amber)">※ ${K.fmtDate(S.date)} は休講</b>` : ""}</dd>
+        ${termRow}
         ${e.owner ? `<dt>担当者</dt><dd>${esc(e.owner)}</dd>` : ""}
         ${e.note ? `<dt>備考</dt><dd>${esc(e.note)}</dd>` : ""}
         ${parts.some((p) => p.row) ? `<dt>元データ</dt><dd class="muted">${parts.map((p) => p.row).filter(Boolean).join("・")}行目${parts.length > 1 ? `（${parts.length}コマ連続をまとめて表示）` : ""}</dd>` : ""}
@@ -1154,7 +1263,7 @@
         ${overlaps.length ? `<dt>⚠ 重複</dt><dd style="color:var(--amber)">${overlaps.map((o) => `${fm(o.start)}–${fm(o.end)} ${esc(o.title)}`).join("、")} と時間が重なっています</dd>` : ""}
       </dl>
       <div class="detail-actions">
-        <button class="btn" type="button" data-act="goto-room" data-room="${esc(e.room)}" ${e.date ? `data-date="${esc(e.date)}"` : ""}>この部屋の時間割を見る</button>
+        <button class="btn" type="button" data-act="goto-room" data-room="${esc(e.room)}" ${jumpDate ? `data-date="${esc(jumpDate)}"` : ""}>この部屋の時間割を見る</button>
         <span class="spacer"></span>
         ${canEdit ? `<button class="btn" type="button" data-act="edit-entry" data-id="${esc(e.id)}" ${parts.length > 1 ? 'title="連続したコマのうち最初のコマを編集します"' : ""}>編集${parts.length > 1 ? "（最初のコマ）" : ""}</button>
           <button class="btn ghost" type="button" data-act="dup-entry" data-id="${esc(e.id)}">複製</button>
@@ -1200,6 +1309,21 @@
     f.owner.value = v.owner || "";
     f.note.value = v.note || "";
 
+    // 期間（クォーター）: 編集中の予定の期間、なければ表示中の日付の期間を初期値にする
+    const terms = S.ds.terms;
+    $("#termField").hidden = !terms.length;
+    S.formCtx.srcTerm = src ? src.term || null : null;
+    S.formCtx.termTouched = !!src;
+    if (terms.length) {
+      const ctxDate = opt.dateHint || (opt.date ? K.parseYmd(opt.date) : null) || viewDate();
+      const c = K.termContext(terms, ctxDate);
+      const def = src ? src.term || "" : (c.current || c.next || c.prev || {}).name || "";
+      const orphan = def && !termByName(def) ? `<option value="${esc(def)}">${esc(def)}（日付の設定なし）</option>` : "";
+      f.term.innerHTML = terms.map((t) => `<option value="${esc(t.name)}">${esc(K.termLabel(t, true))}</option>`).join("") + orphan +
+        `<option value="">すべての期間（共通）</option>`;
+      f.term.value = def;
+    } else f.term.innerHTML = "";
+
     $("#formDays").innerHTML = K.DAYS.map((d, i) => `<button type="button" class="day-toggle" data-day="${i}" aria-pressed="false" aria-label="${d}曜日">${d}</button>`).join("");
     $("#formPeriods").innerHTML = S.ds.periods.map((p, i) => `<button type="button" class="period-chip" data-pi="${i}">${esc(p.name)}<small>${fm(p.start)}</small></button>`).join("");
     syncForm();
@@ -1219,15 +1343,19 @@
       title: f.title.value.trim(),
       owner: f.owner.value.trim(),
       note: f.note.value.trim(),
+      // 期間の欄がない時（期間のないデータ）は、元の予定の期間名をそのまま残す
+      term: S.ds.terms.length ? f.term.value || null : S.formCtx.srcTerm || null,
     };
   }
 
   function formCandidates(v) {
+    const t = termByName(v.term);
+    const tf = { term: v.term || null, termFrom: t ? t.from : null, termTo: t ? t.to : null };
     if (v.mode === "date") {
       const d = K.parseYmd(v.date);
-      return d ? [{ room: v.room, date: v.date, day: K.dayIndexOf(d), start: v.start, end: v.end }] : [];
+      return d ? [{ room: v.room, date: v.date, day: K.dayIndexOf(d), start: v.start, end: v.end, ...tf }] : [];
     }
-    return v.days.map((day) => ({ room: v.room, date: null, day, start: v.start, end: v.end }));
+    return v.days.map((day) => ({ room: v.room, date: null, day, start: v.start, end: v.end, ...tf }));
   }
 
   function syncForm() {
@@ -1242,15 +1370,31 @@
       const p = S.ds.periods[+b.dataset.pi];
       b.classList.toggle("on", v.start !== null && v.end !== null && p.start >= v.start && p.end <= v.end);
     });
+    const term = termByName(v.term);
+    if (S.ds.terms.length) {
+      $("#termHint").textContent = term ? `${K.termLabel(term, true)} の間だけ表示されます`
+        : v.term ? "「期間」シートにない期間名のため、いつでも表示されます" : "期間に関係なく、いつでも表示されます";
+    }
     const warn = $("#formWarn");
     warn.className = "form-warn";
     if (v.start !== null && v.end !== null && v.end <= v.start) { warn.classList.add("error"); warn.textContent = "終了時刻は開始時刻より後にしてください"; return; }
-    if (!v.room || v.start === null || v.end === null) { warn.textContent = ""; return; }
+    const outside = !weekly && term && K.parseYmd(v.date) && (v.date < term.from || v.date > term.to)
+      ? `⚠ 日付が期間「${K.termLabel(term)}」の外なので、このままでは表示されません。期間を選び直してください` : "";
+    if (!v.room || v.start === null || v.end === null) { warn.textContent = outside; return; }
     const ignore = S.formCtx.id ? [S.formCtx.id] : [];
     const hits = formCandidates(v).flatMap((c) => K.overlapsWith(S.ds.entries, c, ignore).map((o) => ({ c, o })));
-    warn.textContent = hits.length
-      ? "⚠ 時間が重なる予定があります: " + hits.slice(0, 3).map(({ o }) => `${o.date ? o.date : K.DAYS[o.day] + "曜"} ${fm(o.start)}–${fm(o.end)}「${o.title}」`).join("、") + (hits.length > 3 ? ` ほか${hits.length - 3}件` : "") + "（このまま保存もできます）"
+    const overlapMsg = hits.length
+      ? "⚠ 時間が重なる予定があります: " + hits.slice(0, 3).map(({ o }) => `${o.term && term ? "" : o.term ? o.term + " " : ""}${o.date ? o.date : K.DAYS[o.day] + "曜"} ${fm(o.start)}–${fm(o.end)}「${o.title}」`).join("、") + (hits.length > 3 ? ` ほか${hits.length - 3}件` : "") + "（このまま保存もできます）"
       : "";
+    warn.textContent = [outside, overlapMsg].filter(Boolean).join(" ");
+  }
+
+  /** 日付指定の予定では、期間を手で選んでいなければ日付に合う期間を選ぶ */
+  function autoPickTerm() {
+    const f = fel();
+    if (!S.ds.terms.length || S.formCtx.termTouched || f.mode.value !== "date") return;
+    const t = K.termFor(S.ds.terms, f.date.value);
+    if (t) f.term.value = t.name;
   }
 
   function submitForm() {
@@ -1283,6 +1427,10 @@
     const fm0 = form();
     const f = fel();
     fm0.addEventListener("submit", (e) => { e.preventDefault(); submitForm(); });
+    // 期間の自動選択は、フォーム全体の syncForm より先に動かす（要素側のリスナーが先に呼ばれる）
+    f.term.addEventListener("change", () => { S.formCtx.termTouched = true; });
+    f.date.addEventListener("change", autoPickTerm);
+    $$('input[name="mode"]', fm0).forEach((r) => r.addEventListener("change", autoPickTerm));
     fm0.addEventListener("input", syncForm);
     fm0.addEventListener("change", syncForm);
     $("#formDays").addEventListener("click", (e) => {
@@ -1339,11 +1487,13 @@
           <div class="stat"><b>${r.entries.length}</b><span>件の予定</span></div>
           <div class="stat"><b>${rooms.size}</b><span>部屋</span></div>
           ${r.periods.length ? `<div class="stat"><b>${r.periods.length}</b><span>時限の定義</span></div>` : ""}
+          ${(r.terms || []).length ? `<div class="stat"><b>${r.terms.length}</b><span>期間（クォーター）</span></div>` : ""}
           <div class="stat"><b style="color:${errs.length ? "var(--amber)" : "inherit"}">${errs.length}</b><span>読み取れない行</span></div>
           ${conflicts ? `<div class="stat"><b style="color:var(--gold-text)">${conflicts}</b><span>時間の重複</span></div>` : ""}
         </div>
+        ${(r.terms || []).length ? `<p class="term-list">期間: ${r.terms.map((t) => `${esc(K.termLabel(t, true))} ${r.entries.filter((e) => e.term === t.name).length}件`).join(" · ")}${r.entries.some((e) => !e.term) ? ` · 共通 ${r.entries.filter((e) => !e.term).length}件` : ""}</p>` : ""}
         ${r.issues.length ? `<details class="issues" open><summary>メッセージ ${r.issues.length}件</summary><ul>${r.issues.slice(0, 50).map((i) =>
-          `<li><span class="lv ${i.level}">${i.level === "error" ? "読めない行" : "注意"}</span><span>${i.row ? i.row + "行目: " : ""}${esc(i.msg)}</span></li>`).join("")}</ul></details>` : ""}
+          `<li><span class="lv ${i.level}">${i.level === "error" ? "読めない行" : "注意"}</span><span>${i.sheet ? `「${esc(i.sheet)}」` : ""}${i.row ? i.row + "行目: " : ""}${esc(i.msg)}</span></li>`).join("")}</ul></details>` : ""}
         <div class="import-mode" role="radiogroup">
           <label><input type="radio" name="imode" value="replace" ${c.mode === "replace" ? "checked" : ""}><span><b>置き換える</b><small>今のデータをすべて、読み込んだ内容に入れ替えます</small></span></label>
           <label><input type="radio" name="imode" value="append" ${c.mode === "append" ? "checked" : ""}><span><b>追加する</b><small>今のデータはそのままに、読み込んだ予定を追加します</small></span></label>
@@ -1366,7 +1516,7 @@
           <span style="font-size:12px">Excel（.xlsx / .xls）・CSV・TSV・JSON に対応</span>
           <button class="btn primary" type="button" data-act="choose-file">ファイルを選ぶ</button>
         </div>
-        <p class="muted" style="font-size:12px">「時間割」シート（なければ「部屋」「曜日」の列がある最初のシート）を読み込みます。「部屋」「時限」シートがあれば一緒に読み込みます。</p>`
+        <p class="muted" style="font-size:12px">「時間割」シート（なければ「部屋」「曜日」の列がある最初のシート）を読み込みます。「部屋」「時限」シートがあれば一緒に読み込みます。「期間」シートがあれば、そこに書かれたクォーターごとのシート（2Q・3Q など）を読み込みます。</p>`
       : `
         <p style="margin:0 0 6px;font-size:13px">Excel や Googleスプレッドシートで表を選んでコピーし、下に貼り付けてください。</p>
         <textarea class="paste-area" id="pasteArea" placeholder="部屋&#9;曜日&#9;開始&#9;終了&#9;内容&#9;担当者&#10;101教室&#9;月&#9;9:00&#9;10:30&#9;情報基礎A&#9;山田">${esc(c.text)}</textarea>
@@ -1409,12 +1559,18 @@
     const r = c.result;
     const mode = (document.querySelector('input[name="imode"]:checked') || {}).value || "replace";
     const entries = r.entries.map((e) => K.makeEntry({ ...e, id: null, row: null }));
+    const rTerms = (r.terms || []).map((t) => ({ name: t.name, from: t.from, to: t.to }));
     mutate((d) => {
       if (mode === "replace") {
         d.entries = entries;
         d.rooms = K.compileRooms(r.rooms, entries);
         if (r.periods.length) d.periods = r.periods;
+        // 期間: 読み込んだ期間に入れ替え。期間名だけの CSV などは今の期間の日付を使い続ける
+        d.terms = rTerms.length ? rTerms : entries.some((e) => e.term) ? d.terms || [] : [];
       } else {
+        // 期間は名前でまとめる（同じ名前の期間は今の日付のまま）
+        d.terms = d.terms || [];
+        rTerms.forEach((t) => { if (!d.terms.some((x) => x.name === t.name)) d.terms.push(t); });
         d.entries.push(...entries);
         K.compileRooms(r.rooms, entries).forEach((room) => {
           const ex = d.rooms.find((x) => x.name === room.name);

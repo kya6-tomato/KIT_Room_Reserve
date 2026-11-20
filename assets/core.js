@@ -209,6 +209,8 @@
     title: ["内容", "授業名", "授業", "科目", "科目名", "用途", "件名", "タイトル", "名称", "予定", "title", "subject", "content", "course", "event"],
     owner: ["担当者", "担当", "担当教員", "教員", "先生", "利用者", "代表者", "予約者", "主催", "owner", "teacher", "instructor", "person"],
     note: ["備考", "メモ", "補足", "note", "notes", "memo", "comment", "remarks"],
+    // クォーター名（CSV・JSON の書き出しで使う列。日付は「期間」シート側に書く）
+    term: ["期間", "クォーター", "term", "quarter"],
   };
   const ROOM_FIELDS = {
     room: ["部屋", "教室", "部屋名", "教室名", "名前", "名称", "room", "name"],
@@ -220,6 +222,12 @@
     name: ["時限", "名前", "名称", "限", "コマ", "name", "period"],
     start: SCHEDULE_FIELDS.start,
     end: SCHEDULE_FIELDS.end,
+  };
+  /* 「期間」シートの列。時間割の「開始」「終了」（時刻）とは別の名前で探す */
+  const TERM_FIELDS = {
+    name: ["シート", "シート名", "名前", "名称", "クォーター", "期間", "sheet", "name"],
+    from: ["開始日", "期間開始", "from", "startdate"],
+    to: ["終了日", "期間終了", "to", "enddate"],
   };
 
   const hkey = (h) => nfkc(h).toLowerCase().replace(/[\s_\-・:：()\[\]【】「」]/g, "");
@@ -275,6 +283,9 @@
       owner: o.owner || "",
       note: o.note || "",
       row: o.row || null,
+      term: o.term || null,         // クォーター名（「期間」シートのシート名）
+      termFrom: o.termFrom || null, // その期間の開始日 "YYYY-MM-DD"
+      termTo: o.termTo || null,     // その期間の終了日 "YYYY-MM-DD"
     };
   }
 
@@ -363,7 +374,7 @@
       }
       if (t.end <= t.start) { err(`終了 ${fmtMin(t.end)} が開始 ${fmtMin(t.start)} より前になっています`); continue; }
 
-      const base = { room, start: t.start, end: t.end, title: plain(get("title")), owner: plain(get("owner")), note: plain(get("note")), row: line };
+      const base = { room, start: t.start, end: t.end, title: plain(get("title")), owner: plain(get("owner")), note: plain(get("note")), row: line, term: plain(get("term")) || null };
       if (date) entries.push(makeEntry({ ...base, date, day: dayIndexOf(parseYmd(date)) }));
       else days.forEach((day) => entries.push(makeEntry({ ...base, day })));
     }
@@ -414,9 +425,58 @@
     return { periods, issues };
   }
 
+  /** 「期間」の表 → [{name, from, to}]（from・to は "YYYY-MM-DD"） */
+  function parseTermTable(aoa, opts = {}) {
+    const sheet = opts.sheet || "";
+    const terms = [];
+    const issues = [];
+    const hd = findHeader(aoa || [], TERM_FIELDS, (m) => "name" in m && "from" in m && "to" in m);
+    if (!hd) {
+      if ((aoa || []).some((r) => (r || []).some((c) => !isBlank(c)))) {
+        issues.push({ level: "warn", sheet, msg: "「シート」「開始日」「終了日」の見出し行が見つからないため、期間の設定を読み飛ばしました" });
+      }
+      return { terms, issues };
+    }
+    for (let r = hd.row + 1; r < aoa.length; r++) {
+      const row = aoa[r] || [];
+      const get = (f) => (f in hd.map ? row[hd.map[f]] : "");
+      const name = plain(get("name"));
+      if (!name) continue;
+      const line = r + 1 + (opts.offset || 0);
+      const warn = (msg) => issues.push({ level: "warn", sheet, row: line, msg });
+      const from = parseDate(get("from"));
+      const to = parseDate(get("to"));
+      if (!from || !to) { warn(`期間「${name}」の開始日・終了日を読み取れません（例: 2026/10/01）`); continue; }
+      if (to < from) { warn(`期間「${name}」の終了日 ${to} が開始日 ${from} より前になっています`); continue; }
+      if (terms.some((t) => hkey(t.name) === hkey(name))) { warn(`期間「${name}」が2回書かれています（最初の行を使います）`); continue; }
+      const dup = terms.find((t) => t.from <= to && from <= t.to);
+      if (dup) warn(`期間「${name}」と「${dup.name}」の日付が重なっています`);
+      terms.push({ name, from, to });
+    }
+    return { terms, issues };
+  }
+
+  /** 名前の書き方の違い（全角・半角、空白など）を無視して一致するものを探す */
+  const findByName = (list, name, key = (x) => x) =>
+    list.find((x) => key(x) === name) || list.find((x) => hkey(key(x)) === hkey(name));
+
+  /** 期間の一覧に合わせて、予定の termFrom / termTo を設定し直す（一覧にない期間名は日付なし＝いつでも有効） */
+  function applyTerms(entries, terms) {
+    (entries || []).forEach((e) => {
+      const t = e.term ? findByName(terms || [], e.term, (x) => x.name) : null;
+      if (t) e.term = t.name;
+      e.termFrom = t ? t.from : null;
+      e.termTo = t ? t.to : null;
+    });
+    return entries;
+  }
+
   /**
-   * 複数の表（時間割・部屋・時限）をまとめて解析する。
-   * tables = { schedule:{aoa, offset, name}, rooms?:{...}, periods?:{...} }
+   * 複数の表（時間割・部屋・時限・期間）をまとめて解析する。
+   * tables = { schedule?:{aoa, offset, name}, rooms?:{...}, periods?:{...},
+   *            terms?:{...}（「期間」の表）, sheets?:{ シート名: {aoa, offset, name} } }
+   * sheets があれば、期間の表に書かれた各シートを時間割として読み、予定に期間を付ける（クォーター）。
+   * sheets がなく terms だけの時（JSON など）は、予定の「期間」列の名前に日付を当てはめる。
    */
   function parseTables(tables, opts = {}) {
     const issues = [];
@@ -432,22 +492,77 @@
       rooms = r.rooms;
       issues.push(...r.issues);
     }
-    const s = tables.schedule || { aoa: [] };
-    const sch = parseSchedule(s.aoa, {
+    let terms = [];
+    const termIssues = [];
+    if (tables.terms) {
+      const t = parseTermTable(tables.terms.aoa, { sheet: tables.terms.name, offset: tables.terms.offset });
+      terms = t.terms;
+      termIssues.push(...t.issues);
+    }
+    const schedOpts = (tb) => ({
       periods: periods.length ? periods : opts.defaultPeriods || [],
-      offset: s.offset,
-      sheet: s.name,
+      offset: tb.offset,
+      sheet: tb.name,
       refYear: opts.refYear,
     });
-    issues.unshift(...sch.issues);
-    if (!sch.ok) throw new Error(sch.issues[0].msg);
-    return { entries: sch.entries, rooms, periods, issues };
+
+    const entries = [];
+    const schedIssues = [];
+    const termMode = !!(tables.sheets && terms.length);
+    if (termMode) {
+      let okCount = 0;
+      let firstError = null;
+      const readSheet = (tb, term) => {
+        const sch = parseSchedule(tb.aoa, schedOpts(tb));
+        schedIssues.push(...sch.issues);
+        if (!sch.ok) { firstError = firstError || `「${tb.name}」: ${sch.issues[0].msg}`; return; }
+        okCount++;
+        if (term) {
+          sch.entries.forEach((e) => {
+            e.term = term.name;
+            e.termFrom = term.from;
+            e.termTo = term.to;
+            if (e.date && (e.date < term.from || e.date > term.to)) {
+              schedIssues.push({ level: "warn", sheet: tb.name, row: e.row, msg: `日付 ${e.date} が期間「${term.name}」（${term.from}〜${term.to}）の外にあるため、表示されません` });
+            }
+          });
+        }
+        entries.push(...sch.entries);
+      };
+      // 期間の表に書かれたシートを順に読む（見つからないシートは注意を出して飛ばす）
+      const names = Object.keys(tables.sheets).filter((n) => tables.sheets[n]);
+      const found = [];
+      terms.forEach((t) => {
+        const n = findByName(names, t.name);
+        if (!n) {
+          termIssues.push({ level: "warn", sheet: tables.terms.name, msg: `期間「${t.name}」のシートが見つからないため読み飛ばしました（シート名を確認してください）` });
+          return;
+        }
+        if (found.some((f) => f.name === n)) return;
+        found.push({ ...t, name: n });
+      });
+      terms = found;
+      terms.forEach((t) => readSheet(tables.sheets[t.name], t));
+      // 期間の表に書かれていない「時間割」シートは、すべての期間に共通の予定として読む
+      if (tables.schedule && !terms.some((t) => t.name === tables.schedule.name)) readSheet(tables.schedule, null);
+      if (!okCount) throw new Error(firstError || "時間割のシートが見つかりません");
+    } else {
+      const s = tables.schedule || { aoa: [] };
+      const sch = parseSchedule(s.aoa, schedOpts(s));
+      if (!sch.ok) throw new Error(sch.issues[0].msg);
+      entries.push(...sch.entries);
+      schedIssues.push(...sch.issues);
+      if (terms.length) applyTerms(entries, terms);
+    }
+    issues.unshift(...schedIssues, ...termIssues);
+    return { entries, rooms, periods, terms, issues };
   }
 
   const SHEET_NAMES = {
     schedule: ["時間割", "予定", "スケジュール", "schedule", "timetable"],
     rooms: ["部屋", "部屋一覧", "教室一覧", "rooms"],
     periods: ["時限", "時限設定", "periods"],
+    terms: ["期間", "クォーター", "学期", "terms"],
   };
 
   /** SheetJS のワークブック → 解析結果 */
@@ -461,20 +576,41 @@
       return { aoa, offset, name };
     };
     const byName = (names) => wb.SheetNames.find((n) => names.some((x) => hkey(n) === hkey(x)));
+    const roomsName = byName(SHEET_NAMES.rooms);
+    const periodsName = byName(SHEET_NAMES.periods);
+
+    // 「期間」シートがあり、そこに書かれたシートが1つでもあれば、クォーターごとのシートを読む
+    const termName = byName(SHEET_NAMES.terms);
+    let termTables = null;
+    const extra = [];
+    if (termName) {
+      const tt = table(termName);
+      const pre = tt ? parseTermTable(tt.aoa) : { terms: [] };
+      const others = wb.SheetNames.filter((n) => n !== termName && n !== roomsName && n !== periodsName);
+      const sheets = {};
+      pre.terms.forEach((t) => { const n = findByName(others, t.name); if (n && !sheets[n]) sheets[n] = table(n); });
+      if (Object.values(sheets).some(Boolean)) termTables = { terms: tt, sheets };
+      else if (pre.terms.length) extra.push({ level: "warn", sheet: termName, msg: "「期間」シートに書かれたシートが見つからないため、期間の設定は使わずに読み込みました" });
+    }
 
     let schedName = byName(SHEET_NAMES.schedule);
-    if (!schedName) {
+    if (termTables && schedName && termTables.sheets[schedName]) schedName = null;
+    if (!schedName && !termTables) {
       schedName = wb.SheetNames.find((n) => {
+        if (n === termName) return false;
         const t = table(n);
         return t && findHeader(t.aoa, SCHEDULE_FIELDS, (m) => "room" in m && ("day" in m || "date" in m));
       });
     }
-    if (!schedName) throw new Error("時間割のシートが見つかりません（「部屋」「曜日」「開始」「終了」の列がある表を用意してください）");
-    return parseTables({
+    if (!schedName && !termTables) throw new Error("時間割のシートが見つかりません（「部屋」「曜日」「開始」「終了」の列がある表を用意してください）");
+    const res = parseTables({
       schedule: table(schedName),
-      rooms: table(byName(SHEET_NAMES.rooms)),
-      periods: table(byName(SHEET_NAMES.periods)),
+      rooms: table(roomsName),
+      periods: table(periodsName),
+      ...(termTables || {}),
     }, opts);
+    res.issues.push(...extra);
+    return res;
   }
 
   /** CSV / TSV（Excel やスプレッドシートからの貼り付け）→ 2次元配列 */
@@ -529,6 +665,7 @@
         schedule: { aoa: toAoa(list), offset: 0, name: "entries" },
         rooms: Array.isArray(obj.rooms) ? { aoa: toAoa(obj.rooms), offset: 0, name: "rooms" } : null,
         periods: Array.isArray(obj.periods) ? { aoa: toAoa(obj.periods), offset: 0, name: "periods" } : null,
+        terms: Array.isArray(obj.terms) && obj.terms.length ? { aoa: toAoa(obj.terms), offset: 0, name: "terms" } : null,
       };
     }
     throw new Error("JSON の形式が正しくありません");
@@ -551,6 +688,42 @@
   const CANCEL_RE = /^(休講|中止|取消|取り消し|キャンセル|休止)/;
   const isCancel = (e) => !!e.date && CANCEL_RE.test(e.title || "");
 
+  /* ---------------------------------------------------------
+     期間（クォーター）
+  --------------------------------------------------------- */
+  const toYmd = (d) => (d instanceof Date ? ymd(d) : d);
+  /** 予定 e がその日 ds（"YYYY-MM-DD"）の期間に入っているか。期間のない予定はいつでも有効 */
+  const inTerm = (e, ds) => (!e.termFrom || e.termFrom <= ds) && (!e.termTo || ds <= e.termTo);
+  /** 2つの予定の期間が重なるか（期間のない予定はすべてと重なる） */
+  const termsOverlap = (a, b) =>
+    (!a.termFrom || !b.termTo || a.termFrom <= b.termTo) && (!b.termFrom || !a.termTo || b.termFrom <= a.termTo);
+
+  /** その日（Date か "YYYY-MM-DD"）を含む期間の一覧 */
+  function termsOn(terms, date) {
+    const ds = toYmd(date);
+    return (terms || []).filter((t) => t.from <= ds && ds <= t.to);
+  }
+  /** その日を含む期間（なければ null） */
+  const termFor = (terms, date) => termsOn(terms, date)[0] || null;
+  /** その日の期間と、直前に終わった期間・次に始まる期間 → {current, prev, next} */
+  function termContext(terms, date) {
+    const ds = toYmd(date);
+    let prev = null;
+    let next = null;
+    (terms || []).forEach((t) => {
+      if (t.to < ds && (!prev || t.to > prev.to)) prev = t;
+      if (t.from > ds && (!next || t.from < next.from)) next = t;
+    });
+    return { current: termFor(terms, ds), prev, next };
+  }
+  /** "2026-10-01" → "10/1"（withYear で "2026/10/1"） */
+  function fmtYmd(s, withYear) {
+    const d = parseYmd(s);
+    return d ? (withYear ? d.getFullYear() + "/" : "") + (d.getMonth() + 1) + "/" + d.getDate() : "";
+  }
+  /** 期間の表示名 → "3Q（10/1〜11/30）" */
+  const termLabel = (t, withYear) => (t ? `${t.name}（${fmtYmd(t.from, withYear)}〜${fmtYmd(t.to, withYear)}）` : "");
+
   /**
    * 指定した日の予定（開始順）。
    * withCancelled: true なら休講になった定期予定も cancelled:true を付けて含める
@@ -558,7 +731,8 @@
   function entriesOn(entries, date, opt = {}) {
     const ds = ymd(date);
     const di = dayIndexOf(date);
-    const todays = entries.filter((e) => (e.date ? e.date === ds : e.day === di));
+    // 期間（クォーター）の外の予定は除く
+    const todays = entries.filter((e) => (e.date ? e.date === ds : e.day === di) && inTerm(e, ds));
     const cancels = todays.filter(isCancel);
     const out = [];
     for (const e of todays) {
@@ -581,7 +755,7 @@
     const out = [];
     const lastBy = new Map();
     for (const e of [...list].sort((a, b) => a.start - b.start || a.end - b.end)) {
-      const key = [e.room, e.title, e.owner, e.date || "", e.day, e.cancelled ? 1 : 0].join("\u0000");
+      const key = [e.room, e.title, e.owner, e.date || "", e.day, e.cancelled ? 1 : 0, e.term || ""].join("\u0000");
       const last = lastBy.get(key);
       if (last && e.start >= last.end && e.start - last.end <= maxGap) {
         last.end = Math.max(last.end, e.end);
@@ -655,6 +829,10 @@
   function clash(entries, a, b) {
     if (a.room !== b.room || isCancel(a) || isCancel(b)) return false;
     if (!(a.start < b.end && b.start < a.end)) return false;
+    // 期間（クォーター）が重ならなければ、同じ曜日・時間でもぶつからない
+    if (!termsOverlap(a, b)) return false;
+    if (a.date && !inTerm(b, a.date)) return false;
+    if (b.date && !inTerm(a, b.date)) return false;
     if (a.date && b.date) return a.date === b.date;
     if (a.day !== b.day) return false;
     if (a.date && cancelledOnDate(entries, b, a.date)) return false;
@@ -696,10 +874,18 @@
       a.day - b.day || a.start - b.start);
   }
 
-  function toScheduleAoa(entries, roomOrder) {
-    return [SCHEDULE_HEADERS, ...sortEntries(entries, roomOrder).map((e) =>
-      [e.room, DAYS[e.day], e.date || "", fmtMin(e.start), fmtMin(e.end), e.title, e.owner, e.note])];
+  /** opt.term: true なら最後に「期間」列を付ける（CSV 用） */
+  function toScheduleAoa(entries, roomOrder, opt = {}) {
+    const head = opt.term ? [...SCHEDULE_HEADERS, "期間"] : SCHEDULE_HEADERS;
+    return [head, ...sortEntries(entries, roomOrder).map((e) => {
+      const row = [e.room, DAYS[e.day], e.date || "", fmtMin(e.start), fmtMin(e.end), e.title, e.owner, e.note];
+      if (opt.term) row.push(e.term || "");
+      return row;
+    })];
   }
+  const slashDate = (s) => String(s || "").replace(/-/g, "/");
+  /** 「期間」シート（シート / 開始日 / 終了日） */
+  const toTermsAoa = (terms) => [["シート", "開始日", "終了日"], ...terms.map((t) => [t.name, slashDate(t.from), slashDate(t.to)])];
   const toRoomsAoa = (rooms) => [["部屋", "建物", "定員", "備考"], ...rooms.map((r) => [r.name, r.building || "", r.capacity ?? "", r.note || ""])];
   const toPeriodsAoa = (periods) => [["時限", "開始", "終了"], ...periods.map((p) => [p.name, fmtMin(p.start), fmtMin(p.end)])];
 
@@ -711,15 +897,21 @@
     return "﻿" + aoa.map((r) => r.map(cell).join(",")).join("\r\n") + "\r\n";
   }
 
-  function toJSON(entries, rooms, periods) {
-    return {
-      entries: sortEntries(entries, rooms.map((r) => r.name)).map((e) => ({
-        room: e.room, day: DAYS[e.day], date: e.date || "", start: fmtMin(e.start), end: fmtMin(e.end),
-        title: e.title, owner: e.owner, note: e.note,
-      })),
+  function toJSON(entries, rooms, periods, terms = []) {
+    const out = {
+      entries: sortEntries(entries, rooms.map((r) => r.name)).map((e) => {
+        const o = {
+          room: e.room, day: DAYS[e.day], date: e.date || "", start: fmtMin(e.start), end: fmtMin(e.end),
+          title: e.title, owner: e.owner, note: e.note,
+        };
+        if (terms.length) o.term = e.term || "";
+        return o;
+      }),
       rooms: rooms.map((r) => ({ room: r.name, building: r.building || "", capacity: r.capacity ?? "", note: r.note || "" })),
       periods: periods.map((p) => ({ name: p.name, start: fmtMin(p.start), end: fmtMin(p.end) })),
     };
+    if (terms.length) out.terms = terms.map((t) => ({ name: t.name, from: t.from, to: t.to }));
+    return out;
   }
 
   const USAGE_LINES = [
@@ -734,6 +926,11 @@
     "内容: 授業名・利用目的など。",
     "担当者・備考: 任意。空欄で構いません。",
     "※ 「開始」「終了」の代わりに「時間」列に「9:00-10:30」や「1-2限」とまとめて書くこともできます。",
+    "",
+    "■ クォーター（期間）",
+    "クォーターごとに時間割が変わる場合は、「2Q」「3Q」のように期間ごとのシートを作り（列は時間割シートと同じ）、「期間」シートに各シートの期間を書きます。",
+    "「期間」シートの列: シート（シート名）・開始日・終了日（例: 3Q / 2026/10/01 / 2026/11/30）。サイトは表示している日付の期間のシートを自動で使います。",
+    "どの期間にも入らない日は「授業期間外」と表示されます。「期間」シートに書かれていない「時間割」シートの予定は、すべての期間に共通の予定として扱われます。",
     "",
     "■ 休講・中止",
     "日付を入れて、内容を「休講」や「中止」で始めると、その日のその時間の毎週の予定が取り消されます。",
@@ -753,9 +950,10 @@
     DAYS, pad2, nfkc, isBlank, fmtMin, fmtDuration,
     parseTime, parseTimeRange, parsePeriodRef, parseDays, parseDate,
     dateOnly, dayIndexOf, ymd, parseYmd, addDays, startOfWeek, sameDay, fmtDate,
-    mapHeader, SCHEDULE_FIELDS, parseSchedule, parseRooms, parsePeriods, parseTables, parseWorkbook,
+    mapHeader, SCHEDULE_FIELDS, parseSchedule, parseRooms, parsePeriods, parseTermTable, parseTables, parseWorkbook,
     parseDelimited, jsonToTables, makeEntry, newId,
+    applyTerms, inTerm, termsOn, termFor, termContext, termLabel, fmtYmd,
     compileRooms, isCancel, entriesOn, mergeConsecutive, roomStatus, freeIntervals, assignLanes, findConflicts, overlapsWith,
-    sortEntries, toScheduleAoa, toRoomsAoa, toPeriodsAoa, toCSV, toJSON, USAGE_LINES,
+    sortEntries, toScheduleAoa, toRoomsAoa, toPeriodsAoa, toTermsAoa, toCSV, toJSON, USAGE_LINES,
   };
 });
