@@ -6,7 +6,14 @@
 <title>部屋使用状況</title>
 <meta name="description" content="部屋・教室の使用状況をリアルタイムで確認できるボード">
 <meta name="theme-color" content="#14181C">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2314181C'/%3E%3Crect x='12' y='14' width='40' height='36' rx='4' fill='%23EDEAE1'/%3E%3Crect x='12' y='14' width='40' height='8' rx='3' fill='%23C9922E'/%3E%3Ccircle cx='24' cy='35' r='5' fill='%232F6F62'/%3E%3Ccircle cx='40' cy='35' r='5' fill='%23D1573F'/%3E%3C/svg%3E">
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<!-- LINE や SNS で URL を送ったときのプレビュー（別の場所で公開する場合は og:image の URL を書き換えてください） -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="部屋使用状況">
+<meta property="og:description" content="教室がいま使われているか・いつ空くかをひと目で確認できるボード">
+<meta property="og:image" content="https://kya6-tomato.github.io/KIT_Room_Reserve/assets/og.png">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
@@ -22,8 +29,17 @@
 <header class="site-header">
   <div class="header-inner">
     <div class="brand">
-      <p class="brand-eyebrow" id="brandEyebrow">ROOM STATUS BOARD</p>
-      <h1 class="brand-title" id="brandTitle">部屋使用状況</h1>
+      <svg class="brand-logo" viewBox="0 0 64 64" aria-hidden="true">
+        <rect width="64" height="64" rx="14" fill="#232A30"/>
+        <rect x="18" y="13" width="28" height="41" rx="5" fill="#EDEAE1"/>
+        <rect x="18" y="50" width="28" height="4" fill="#C9922E"/>
+        <circle cx="39" cy="34" r="2.6" fill="#232A30"/>
+        <circle cx="47" cy="15" r="7" fill="#2F6F62" stroke="#232A30" stroke-width="3"/>
+      </svg>
+      <div>
+        <p class="brand-eyebrow" id="brandEyebrow">ROOM STATUS BOARD</p>
+        <h1 class="brand-title" id="brandTitle">部屋使用状況</h1>
+      </div>
     </div>
     <div class="header-right">
       <div class="clock-box">

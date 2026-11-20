@@ -83,6 +83,9 @@ schedule.xlsx       時間割データ
 assets/core.js      データ解析・時刻計算（画面に依存しない処理）
 assets/app.js       画面の表示と操作
 assets/style.css    デザイン
+assets/logo.svg     ロゴ（ブラウザのタブのアイコンにも使用）
+assets/icon-180.png スマホのホーム画面用アイコン
+assets/og.png       URL を送ったときのプレビュー画像
 KIT_Room_Usage.html 以前の URL から index.html へ移動するためのページ
 tests/core.test.js  core.js のテスト（node tests/core.test.js）
 ```
